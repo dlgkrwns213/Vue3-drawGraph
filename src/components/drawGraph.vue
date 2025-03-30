@@ -34,6 +34,7 @@ body {
 }
 
 .graph-button {
+  width: 100%;
   height: 100px;
   background: #333;
   color: white;
@@ -63,6 +64,7 @@ body {
   background-color: rgb(41, 41, 41);
   margin: 0 20px;
   color: rgb(215, 215, 215);
+  font-size: 20px;
 }
 
 .back-button {
@@ -72,7 +74,7 @@ body {
   background-color: transparent;
   z-index: 99;
   position: absolute;
-  top: 110px;
+  top: 160px;
   right: 50px;
   cursor: pointer;
   display: flex;               /* flexbox 활성화 */
