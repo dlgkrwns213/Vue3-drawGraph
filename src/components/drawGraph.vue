@@ -5,6 +5,8 @@ import { bfs, dfs, dijkstra } from '../utils/functions.js';
 const TOOLBAR_HEIGHT = 100;
 const NODE_RADIUS = 25;
 const MIN_NODE_DISTANCE = 80;
+const DRAG_START_DISTANCE = 5;
+const RELAXATION_STEPS = 8;
 const ANIMATION_DELAY = 500;
 const RESET_DELAY = 1000;
 const DISABLED_WEIGHT = null;
@@ -25,6 +27,8 @@ const isProcessing = ref(false);
 const nodeOrders = ref({});
 const hoveredWeight = ref(null);
 const nextEdgeId = ref(1);
+const dragState = ref(null);
+const shouldSuppressNodeClick = ref(false);
 
 const hasNodes = computed(() => nodes.value.length > 0);
 
@@ -42,15 +46,8 @@ function handleClick(event) {
 
   const { x, y } = getPointerPosition(event);
 
-  for (const node of nodes.value) {
-    const distance = Math.hypot(x - node.x, y - node.y);
-    if (distance <= MIN_NODE_DISTANCE) {
-      alert('Too close');
-      return;
-    }
-  }
-
   addNode(x, y);
+  relaxNodePositions(nodes.value.length - 1);
 
   if (startIdx.value === -1) {
     setStartNode(nodes.value[nodes.value.length - 1].id);
@@ -79,6 +76,11 @@ function getNextNodeId() {
 function connectNode(index, event) {
   if (isProcessing.value) return;
 
+  if (shouldSuppressNodeClick.value) {
+    shouldSuppressNodeClick.value = false;
+    return;
+  }
+
   if (event.ctrlKey) {
     setStartNode(nodes.value[index].id);
     cancelCurrentLine();
@@ -99,6 +101,131 @@ function connectNode(index, event) {
 
   addConnection(selectedNode.value, index);
   cancelCurrentLine();
+}
+
+function startNodeDrag(index, event) {
+  if (isProcessing.value || selectedNode.value !== null || event.button !== 0) return;
+
+  const node = nodes.value[index];
+  if (!node) return;
+
+  dragState.value = {
+    index,
+    nodeId: node.id,
+    startMouseX: event.clientX,
+    startMouseY: event.clientY,
+    offsetX: event.clientX - node.x,
+    offsetY: event.clientY - node.y,
+    didMove: false,
+  };
+
+  window.addEventListener('mousemove', dragNode);
+  window.addEventListener('mouseup', stopNodeDrag);
+}
+
+function dragNode(event) {
+  const state = dragState.value;
+  if (!state) return;
+
+  const distance = Math.hypot(event.clientX - state.startMouseX, event.clientY - state.startMouseY);
+  if (!state.didMove && distance < DRAG_START_DISTANCE) return;
+
+  state.didMove = true;
+  shouldSuppressNodeClick.value = true;
+
+  const node = nodes.value[state.index];
+  if (!node) return;
+
+  const rect = graphRoot.value.getBoundingClientRect();
+  node.x = clamp(event.clientX - state.offsetX, NODE_RADIUS, rect.width - NODE_RADIUS);
+  node.y = clamp(event.clientY - state.offsetY, TOOLBAR_HEIGHT + NODE_RADIUS, rect.height - NODE_RADIUS);
+
+  relaxNodePositions(state.index);
+  updateAllLines();
+}
+
+function stopNodeDrag() {
+  if (dragState.value?.didMove) {
+    shouldSuppressNodeClick.value = true;
+  }
+
+  dragState.value = null;
+  window.removeEventListener('mousemove', dragNode);
+  window.removeEventListener('mouseup', stopNodeDrag);
+}
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function relaxNodePositions(anchorIndex) {
+  const rect = graphRoot.value.getBoundingClientRect();
+
+  for (let step = 0; step < RELAXATION_STEPS; step += 1) {
+    let moved = false;
+
+    for (let a = 0; a < nodes.value.length; a += 1) {
+      for (let b = a + 1; b < nodes.value.length; b += 1) {
+        const nodeA = nodes.value[a];
+        const nodeB = nodes.value[b];
+        const dx = nodeB.x - nodeA.x;
+        const dy = nodeB.y - nodeA.y;
+        const distance = Math.hypot(dx, dy);
+
+        if (distance >= MIN_NODE_DISTANCE) continue;
+
+        const fallbackAngle = ((nodeA.id + nodeB.id * 137) % 360) * (Math.PI / 180);
+        const unitX = distance === 0 ? Math.cos(fallbackAngle) : dx / distance;
+        const unitY = distance === 0 ? Math.sin(fallbackAngle) : dy / distance;
+        const overlap = MIN_NODE_DISTANCE - distance;
+        const anchorA = a === anchorIndex;
+        const anchorB = b === anchorIndex;
+
+        if (anchorA && !anchorB) {
+          nodeB.x = clamp(nodeB.x + unitX * overlap, NODE_RADIUS, rect.width - NODE_RADIUS);
+          nodeB.y = clamp(nodeB.y + unitY * overlap, TOOLBAR_HEIGHT + NODE_RADIUS, rect.height - NODE_RADIUS);
+        } else if (anchorB && !anchorA) {
+          nodeA.x = clamp(nodeA.x - unitX * overlap, NODE_RADIUS, rect.width - NODE_RADIUS);
+          nodeA.y = clamp(nodeA.y - unitY * overlap, TOOLBAR_HEIGHT + NODE_RADIUS, rect.height - NODE_RADIUS);
+        } else {
+          const push = overlap / 2;
+          nodeA.x = clamp(nodeA.x - unitX * push, NODE_RADIUS, rect.width - NODE_RADIUS);
+          nodeA.y = clamp(nodeA.y - unitY * push, TOOLBAR_HEIGHT + NODE_RADIUS, rect.height - NODE_RADIUS);
+          nodeB.x = clamp(nodeB.x + unitX * push, NODE_RADIUS, rect.width - NODE_RADIUS);
+          nodeB.y = clamp(nodeB.y + unitY * push, TOOLBAR_HEIGHT + NODE_RADIUS, rect.height - NODE_RADIUS);
+        }
+
+        moved = true;
+      }
+    }
+
+    if (!moved) break;
+  }
+}
+
+function updateLinesForNode(nodeId) {
+  for (let index = 0; index < graphConnections.value.length; index += 1) {
+    const [from, to] = graphConnections.value[index];
+    const fromNode = nodes.value.find(node => node.id === from);
+    const toNode = nodes.value.find(node => node.id === to);
+
+    if (!fromNode || !toNode || (from !== nodeId && to !== nodeId)) continue;
+
+    lines.value[index] = {
+      ...lines.value[index],
+      x1: fromNode.x,
+      y1: fromNode.y,
+      x2: toNode.x,
+      y2: toNode.y,
+    };
+    syncLineHistory(index);
+  }
+}
+
+function updateAllLines() {
+  for (const node of nodes.value) {
+    updateLinesForNode(node.id);
+  }
 }
 
 function addConnection(fromIndex, toIndex) {
@@ -154,6 +281,7 @@ function syncLineHistory(lineIndex) {
     if (action.type !== 'line') continue;
 
     if (action.id === lineId) {
+      action.line = { ...lines.value[lineIndex] };
       action.input = { ...inputFields.value[lineIndex] };
       action.connection = [...graphConnections.value[lineIndex]];
       return;
@@ -745,6 +873,8 @@ function normalizeStartNode() {
 
 onBeforeUnmount(() => {
   window.removeEventListener('mousemove', drawLine);
+  window.removeEventListener('mousemove', dragNode);
+  window.removeEventListener('mouseup', stopNodeDrag);
 });
 </script>
 
@@ -964,6 +1094,7 @@ onBeforeUnmount(() => {
         width: `${NODE_RADIUS * 2}px`,
         height: `${NODE_RADIUS * 2}px`,
       }"
+      @mousedown.left.stop="startNodeDrag(index, $event)"
       @click.stop="connectNode(index, $event)"
       @contextmenu.stop.prevent="deleteNode(index)"
     >
