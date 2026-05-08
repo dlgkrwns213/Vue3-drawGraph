@@ -1,11 +1,14 @@
 import Queue from './queue.js';
 import MinHeap from './minHeap.js';
 
-function makeGraph(n, lineGraph) {
-  const graph = Array(n + 1).fill().map(() => []);
+function makeGraph(nodes, lineGraph) {
+  const nodeIds = nodes.map((node, index) => node.id ?? index + 1);
+  const nodeIdSet = new Set(nodeIds);
+  const maxNodeId = Math.max(0, ...nodeIds);
+  const graph = Array(maxNodeId + 1).fill().map(() => []);
 
   for (const [u, v, rawForwardWeight, rawBackwardWeight = rawForwardWeight] of lineGraph) {
-    if (!Number.isInteger(u) || !Number.isInteger(v) || u < 1 || v < 1 || u > n || v > n) {
+    if (!Number.isInteger(u) || !Number.isInteger(v) || !nodeIdSet.has(u) || !nodeIdSet.has(v)) {
       continue;
     }
 
@@ -41,10 +44,9 @@ function normalizeWeight(weight) {
 }
 
 function bfs(nodes, lineGraph, startIdx = 1) {
-  const n = nodes.length;
-  const graph = makeGraph(n, lineGraph);
+  const graph = makeGraph(nodes, lineGraph);
   const queue = new Queue();
-  const visited = Array(n + 1).fill(false);
+  const visited = Array(graph.length).fill(false);
   const sameLevel = [];
   const orderIdx = [];
   const levels = [];
@@ -81,10 +83,9 @@ function bfs(nodes, lineGraph, startIdx = 1) {
 }
 
 function dfs(nodes, lineGraph, startIdx = 1) {
-  const n = nodes.length;
-  const graph = makeGraph(n, lineGraph);
+  const graph = makeGraph(nodes, lineGraph);
   const dfsNodeOrder = [];
-  const visited = Array(n + 1).fill(false);
+  const visited = Array(graph.length).fill(false);
 
   visited[startIdx] = true;
   dfsRecur(startIdx, dfsNodeOrder, visited, graph);
@@ -104,10 +105,9 @@ function dfsRecur(nowIdx, dfsNodeOrder, visited, graph) {
 }
 
 function dijkstra(nodes, lineGraph, startIdx = 1) {
-  const n = nodes.length;
-  const graph = makeGraph(n, lineGraph);
+  const graph = makeGraph(nodes, lineGraph);
   const heap = new MinHeap();
-  const distances = Array(n + 1).fill(Infinity);
+  const distances = Array(graph.length).fill(Infinity);
   const nodeOrder = [];
 
   heap.push([0, startIdx]);

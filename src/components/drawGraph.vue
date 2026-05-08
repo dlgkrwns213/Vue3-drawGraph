@@ -22,8 +22,9 @@ const startIdx = ref(-1);
 const nodeSelecting = ref([]);
 const nodeSelected = ref([]);
 const isProcessing = ref(false);
-const nodeOrders = ref([]);
+const nodeOrders = ref({});
 const hoveredWeight = ref(null);
+const nextEdgeId = ref(1);
 
 const hasNodes = computed(() => nodes.value.length > 0);
 
@@ -50,25 +51,36 @@ function handleClick(event) {
   }
 
   addNode(x, y);
-  nodeOrders.value.push(Number.NaN);
 
   if (startIdx.value === -1) {
-    setStartNode(1);
+    setStartNode(nodes.value[nodes.value.length - 1].id);
   }
 }
 
 function addNode(x, y) {
-  const node = { x, y };
+  const node = { id: getNextNodeId(), x, y };
 
   nodes.value.push(node);
+  nodeOrders.value[node.id] = Number.NaN;
   pushHistory({ type: 'node', node });
+}
+
+function getNextNodeId() {
+  const usedIds = new Set(nodes.value.map(node => node.id));
+  let id = 1;
+
+  while (usedIds.has(id)) {
+    id += 1;
+  }
+
+  return id;
 }
 
 function connectNode(index, event) {
   if (isProcessing.value) return;
 
   if (event.ctrlKey) {
-    setStartNode(index + 1);
+    setStartNode(nodes.value[index].id);
     cancelCurrentLine();
     return;
   }
@@ -80,7 +92,7 @@ function connectNode(index, event) {
   }
 
   if (selectedNode.value === index) {
-    setStartNode(index + 1);
+    setStartNode(nodes.value[index].id);
     cancelCurrentLine();
     return;
   }
@@ -90,8 +102,8 @@ function connectNode(index, event) {
 }
 
 function addConnection(fromIndex, toIndex) {
-  const from = fromIndex + 1;
-  const to = toIndex + 1;
+  const from = nodes.value[fromIndex].id;
+  const to = nodes.value[toIndex].id;
   const minNode = Math.min(from, to);
   const maxNode = Math.max(from, to);
   const isDuplicate = graphConnections.value.some(
@@ -106,11 +118,13 @@ function addConnection(fromIndex, toIndex) {
   const fromNode = nodes.value[fromIndex];
   const toNode = nodes.value[toIndex];
   const line = {
+    id: nextEdgeId.value,
     x1: fromNode.x,
     y1: fromNode.y,
     x2: toNode.x,
     y2: toNode.y,
   };
+  nextEdgeId.value += 1;
 
   lines.value.push(line);
   inputFields.value.push({
@@ -120,6 +134,7 @@ function addConnection(fromIndex, toIndex) {
   graphConnections.value.push([from, to, 1, 1]);
   pushHistory({
     type: 'line',
+    id: line.id,
     line,
     input: { forward: 1, backward: 1 },
     connection: [from, to, 1, 1],
@@ -132,17 +147,23 @@ function pushHistory(action) {
 }
 
 function syncLineHistory(lineIndex) {
-  let currentLineIndex = -1;
+  const lineId = lines.value[lineIndex]?.id;
+  if (!lineId) return;
 
   for (const action of userDone.value) {
     if (action.type !== 'line') continue;
 
-    currentLineIndex += 1;
-    if (currentLineIndex === lineIndex) {
+    if (action.id === lineId) {
       action.input = { ...inputFields.value[lineIndex] };
       action.connection = [...graphConnections.value[lineIndex]];
       return;
     }
+  }
+}
+
+function syncAllLineHistory() {
+  for (let index = 0; index < lines.value.length; index += 1) {
+    syncLineHistory(index);
   }
 }
 
@@ -248,6 +269,145 @@ function handleMouseDown(event) {
     event.preventDefault();
     cancelCurrentLine();
   }
+}
+
+function deleteNode(index) {
+  if (isProcessing.value) return;
+
+  const node = nodes.value[index];
+  if (!node) return;
+
+  const action = createDeleteNodeAction(index);
+  applyDeleteNodeAction(action);
+  pushHistory(action);
+}
+
+function deleteEdge(index) {
+  if (isProcessing.value) return;
+
+  const line = lines.value[index];
+  if (!line) return;
+
+  const action = createDeleteEdgeAction(index);
+  applyDeleteEdgeAction(action);
+  pushHistory(action);
+}
+
+function createDeleteEdgeAction(index) {
+  return {
+    type: 'delete-edge',
+    index,
+    line: { ...lines.value[index] },
+    input: { ...inputFields.value[index] },
+    connection: [...graphConnections.value[index]],
+  };
+}
+
+function applyDeleteEdgeAction(action) {
+  cancelCurrentLine();
+  lines.value.splice(action.index, 1);
+  inputFields.value.splice(action.index, 1);
+  graphConnections.value.splice(action.index, 1);
+  clearHoveredWeight();
+  syncAllLineHistory();
+}
+
+function revertDeleteEdgeAction(action) {
+  lines.value.splice(action.index, 0, { ...action.line });
+  inputFields.value.splice(action.index, 0, { ...action.input });
+  graphConnections.value.splice(action.index, 0, [...action.connection]);
+  nextEdgeId.value = Math.max(nextEdgeId.value, action.line.id + 1);
+  syncAllLineHistory();
+}
+
+function createDeleteNodeAction(index) {
+  const nodeNumber = nodes.value[index].id;
+  const removedEdges = [];
+
+  graphConnections.value.forEach((connection, edgeIndex) => {
+    const [from, to] = connection;
+    if (from === nodeNumber || to === nodeNumber) {
+      removedEdges.push({
+        index: edgeIndex,
+        line: { ...lines.value[edgeIndex] },
+        input: { ...inputFields.value[edgeIndex] },
+        connection: [...connection],
+      });
+    }
+  });
+
+  return {
+    type: 'delete-node',
+    index,
+    node: { ...nodes.value[index] },
+    nodeOrder: nodeOrders.value[nodeNumber],
+    startIdxBefore: startIdx.value,
+    nodeSelectingBefore: [...nodeSelecting.value],
+    nodeSelectedBefore: [...nodeSelected.value],
+    removedEdges,
+  };
+}
+
+function applyDeleteNodeAction(action) {
+  const deletedNodeNumber = action.node.id;
+  const removedEdgeIndexes = new Set(action.removedEdges.map(edge => edge.index));
+
+  cancelCurrentLine();
+  nodes.value.splice(action.index, 1);
+  delete nodeOrders.value[deletedNodeNumber];
+
+  lines.value = lines.value.filter((_, index) => !removedEdgeIndexes.has(index));
+  inputFields.value = inputFields.value.filter((_, index) => !removedEdgeIndexes.has(index));
+  graphConnections.value = graphConnections.value
+    .filter((_, index) => !removedEdgeIndexes.has(index));
+
+  normalizeStartNodeAfterDelete(action.startIdxBefore, deletedNodeNumber);
+  nodeSelected.value = nodeSelected.value
+    .filter(node => node !== deletedNodeNumber);
+  clearHoveredWeight();
+  syncAllLineHistory();
+}
+
+function revertDeleteNodeAction(action) {
+  nodes.value.splice(action.index, 0, { ...action.node });
+  nodeOrders.value[action.node.id] = action.nodeOrder;
+
+  for (const edge of action.removedEdges) {
+    lines.value.splice(edge.index, 0, { ...edge.line });
+    inputFields.value.splice(edge.index, 0, { ...edge.input });
+    graphConnections.value.splice(edge.index, 0, [...edge.connection]);
+    nextEdgeId.value = Math.max(nextEdgeId.value, edge.line.id + 1);
+  }
+
+  startIdx.value = action.startIdxBefore;
+  nodeSelecting.value = [...action.nodeSelectingBefore];
+  nodeSelected.value = [...action.nodeSelectedBefore];
+  syncAllLineHistory();
+}
+
+function normalizeStartNodeAfterDelete(previousStartIdx, deletedNodeNumber) {
+  if (nodes.value.length === 0) {
+    startIdx.value = -1;
+    nodeSelecting.value = [];
+    nodeSelected.value = [];
+    return;
+  }
+
+  if (previousStartIdx === -1) {
+    setStartNode(getSmallestNodeId());
+    return;
+  }
+
+  if (previousStartIdx === deletedNodeNumber) {
+    setStartNode(getSmallestNodeId());
+    return;
+  }
+
+  setStartNode(previousStartIdx);
+}
+
+function getSmallestNodeId() {
+  return Math.min(...nodes.value.map(node => node.id));
 }
 
 function cancelCurrentLine() {
@@ -413,8 +573,10 @@ function redoLastAction() {
 
 function revertAction(action) {
   if (action.type === 'node') {
-    nodes.value.pop();
-    nodeOrders.value.pop();
+    const node = nodes.value.pop();
+    if (node) {
+      delete nodeOrders.value[node.id];
+    }
     normalizeStartNode();
     return;
   }
@@ -422,6 +584,16 @@ function revertAction(action) {
   if (action.type === 'weight') {
     setWeight(action.index, action.direction, action.beforeWeight, action.beforeInputValue);
     syncLineHistory(action.index);
+    return;
+  }
+
+  if (action.type === 'delete-node') {
+    revertDeleteNodeAction(action);
+    return;
+  }
+
+  if (action.type === 'delete-edge') {
+    revertDeleteEdgeAction(action);
     return;
   }
 
@@ -433,10 +605,10 @@ function revertAction(action) {
 function applyAction(action) {
   if (action.type === 'node') {
     nodes.value.push({ ...action.node });
-    nodeOrders.value.push(Number.NaN);
+    nodeOrders.value[action.node.id] = Number.NaN;
 
     if (startIdx.value === -1) {
-      setStartNode(1);
+      setStartNode(action.node.id);
     }
 
     return;
@@ -448,9 +620,20 @@ function applyAction(action) {
     return;
   }
 
+  if (action.type === 'delete-node') {
+    applyDeleteNodeAction(action);
+    return;
+  }
+
+  if (action.type === 'delete-edge') {
+    applyDeleteEdgeAction(action);
+    return;
+  }
+
   lines.value.push({ ...action.line });
   inputFields.value.push({ ...action.input });
   graphConnections.value.push([...action.connection]);
+  nextEdgeId.value = Math.max(nextEdgeId.value, action.line.id + 1);
 }
 
 async function clickBFSButton(groupByLevel) {
@@ -484,7 +667,7 @@ function canRunAlgorithm() {
 
 async function runAlgorithm(callback) {
   isProcessing.value = true;
-  nodeOrders.value.fill(Number.NaN);
+  resetNodeOrders();
   nodeSelected.value = [];
   cancelCurrentLine();
 
@@ -533,7 +716,13 @@ function markNode(node, order) {
     nodeSelected.value.push(node);
   }
 
-  nodeOrders.value[node - 1] = order;
+  nodeOrders.value[node] = order;
+}
+
+function resetNodeOrders() {
+  for (const node of nodes.value) {
+    nodeOrders.value[node.id] = Number.NaN;
+  }
 }
 
 function setStartNode(nodeNumber) {
@@ -549,8 +738,8 @@ function normalizeStartNode() {
     return;
   }
 
-  if (startIdx.value > nodes.value.length) {
-    setStartNode(nodes.value.length);
+  if (!nodes.value.some(node => node.id === startIdx.value)) {
+    setStartNode(getSmallestNodeId());
   }
 }
 
@@ -644,6 +833,17 @@ onBeforeUnmount(() => {
         class="edge-line"
         :marker-end="hasForwardDirection(index) ? 'url(#arrow-forward)' : null"
         :marker-start="hasBackwardDirection(index) ? 'url(#arrow-backward)' : null"
+      />
+      <line
+        v-for="(line, index) in lines"
+        :key="`line-hit-${line.id}`"
+        :x1="getVisibleLine(line).x1"
+        :y1="getVisibleLine(line).y1 - TOOLBAR_HEIGHT"
+        :x2="getVisibleLine(line).x2"
+        :y2="getVisibleLine(line).y2 - TOOLBAR_HEIGHT"
+        class="edge-hit-line"
+        @click.stop
+        @contextmenu.stop.prevent="deleteEdge(index)"
       />
       <line
         v-for="(line, index) in lines"
@@ -751,11 +951,11 @@ onBeforeUnmount(() => {
 
     <div
       v-for="(node, index) in nodes"
-      :key="`node-${index}`"
+      :key="`node-${node.id}`"
       class="node"
       :class="{
-        'node-selecting': nodeSelecting.includes(index + 1),
-        'node-selected': nodeSelected.includes(index + 1),
+        'node-selecting': nodeSelecting.includes(node.id),
+        'node-selected': nodeSelected.includes(node.id),
         'node-pending': selectedNode === index,
       }"
       :style="{
@@ -765,11 +965,11 @@ onBeforeUnmount(() => {
         height: `${NODE_RADIUS * 2}px`,
       }"
       @click.stop="connectNode(index, $event)"
-      @contextmenu.prevent="handleMouseDown"
+      @contextmenu.stop.prevent="deleteNode(index)"
     >
-      <div class="node-index">{{ index + 1 }}</div>
-      <div v-if="!Number.isNaN(nodeOrders[index])" class="node-order">
-        {{ nodeOrders[index] }}
+      <div class="node-index">{{ node.id }}</div>
+      <div v-if="!Number.isNaN(nodeOrders[node.id])" class="node-order">
+        {{ nodeOrders[node.id] }}
       </div>
     </div>
   </div>
@@ -950,6 +1150,13 @@ onBeforeUnmount(() => {
 .edge-line {
   stroke: white;
   stroke-width: 2;
+}
+
+.edge-hit-line {
+  stroke: transparent;
+  stroke-width: 14;
+  cursor: pointer;
+  pointer-events: stroke;
 }
 
 .edge-line-preview {
