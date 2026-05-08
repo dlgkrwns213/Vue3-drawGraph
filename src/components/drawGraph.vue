@@ -29,6 +29,8 @@ const hoveredWeight = ref(null);
 const nextEdgeId = ref(1);
 const dragState = ref(null);
 const shouldSuppressNodeClick = ref(false);
+const traversalResult = ref(null);
+const activeResultStep = ref(-1);
 
 const hasNodes = computed(() => nodes.value.length > 0);
 
@@ -769,6 +771,7 @@ async function clickBFSButton(groupByLevel) {
 
   await runAlgorithm(async () => {
     const { levels, orderIdx } = bfs(nodes.value, graphConnections.value, startIdx.value);
+    setTraversalResult(groupByLevel ? 'BFS Level' : 'BFS', groupByLevel ? levels : orderIdx, groupByLevel);
     await colorNodes(groupByLevel ? levels : orderIdx, groupByLevel);
   });
 }
@@ -777,7 +780,9 @@ async function clickDFSButton() {
   if (!canRunAlgorithm()) return;
 
   await runAlgorithm(async () => {
-    await colorNodes(dfs(nodes.value, graphConnections.value, startIdx.value));
+    const order = dfs(nodes.value, graphConnections.value, startIdx.value);
+    setTraversalResult('DFS', order);
+    await colorNodes(order);
   });
 }
 
@@ -785,8 +790,19 @@ async function clickDijkstraButton() {
   if (!canRunAlgorithm()) return;
 
   await runAlgorithm(async () => {
-    await colorNodes(dijkstra(nodes.value, graphConnections.value, startIdx.value));
+    const order = dijkstra(nodes.value, graphConnections.value, startIdx.value);
+    setTraversalResult('Dijkstra', order);
+    await colorNodes(order);
   });
+}
+
+function setTraversalResult(label, sequence, isGrouped = false) {
+  traversalResult.value = {
+    label,
+    isGrouped,
+    sequence: isGrouped ? sequence.map(group => [...group]) : [...sequence],
+  };
+  activeResultStep.value = -1;
 }
 
 function canRunAlgorithm() {
@@ -816,6 +832,7 @@ async function colorNodes(sequence, isGrouped = false) {
   if (isGrouped) {
     for (let idx = 0; idx < sequence.length; idx += 1) {
       const currentLevel = sequence[idx];
+      activeResultStep.value = idx;
       nodeSelecting.value = [...currentLevel];
 
       for (const node of currentLevel) {
@@ -827,6 +844,7 @@ async function colorNodes(sequence, isGrouped = false) {
   } else {
     for (let idx = 0; idx < sequence.length; idx += 1) {
       const node = sequence[idx];
+      activeResultStep.value = idx;
       nodeSelecting.value = [node];
       markNode(node, idx + 1);
       await delay(ANIMATION_DELAY);
@@ -834,6 +852,7 @@ async function colorNodes(sequence, isGrouped = false) {
   }
 
   nodeSelecting.value = [];
+  activeResultStep.value = -1;
   await delay(RESET_DELAY);
   nodeSelecting.value = startIdx.value === -1 ? [] : [startIdx.value];
   nodeSelected.value = [];
@@ -1103,6 +1122,45 @@ onBeforeUnmount(() => {
         {{ nodeOrders[node.id] }}
       </div>
     </div>
+
+    <section v-if="traversalResult" class="traversal-panel" aria-label="algorithm traversal result">
+      <div class="traversal-header">
+        <strong>{{ traversalResult.label }}</strong>
+        <span>start {{ startIdx }}</span>
+      </div>
+
+      <div v-if="traversalResult.isGrouped" class="traversal-levels">
+        <div
+          v-for="(group, groupIndex) in traversalResult.sequence"
+          :key="`level-${groupIndex}`"
+          class="traversal-level"
+          :class="{ 'traversal-active': activeResultStep === groupIndex }"
+        >
+          <span class="traversal-step-label">L{{ groupIndex }}</span>
+          <div class="traversal-group">
+            <span
+              v-for="nodeId in group"
+              :key="`level-${groupIndex}-node-${nodeId}`"
+              class="traversal-node"
+            >
+              {{ nodeId }}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div v-else class="traversal-order">
+        <div
+          v-for="(nodeId, orderIndex) in traversalResult.sequence"
+          :key="`order-${orderIndex}-${nodeId}`"
+          class="traversal-order-item"
+          :class="{ 'traversal-active': activeResultStep === orderIndex }"
+        >
+          <span class="traversal-step-label">{{ orderIndex + 1 }}</span>
+          <span class="traversal-node">{{ nodeId }}</span>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -1340,5 +1398,105 @@ onBeforeUnmount(() => {
   color: #ff5656;
   font-size: 12px;
   font-weight: 700;
+}
+
+.traversal-panel {
+  position: absolute;
+  left: 24px;
+  right: 24px;
+  bottom: 20px;
+  z-index: 80;
+  min-height: 78px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(22, 22, 22, 0.9);
+  color: white;
+  padding: 12px 14px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32);
+}
+
+.traversal-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.traversal-header strong {
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.traversal-header span {
+  color: #b9c4d0;
+  font-size: 12px;
+}
+
+.traversal-order,
+.traversal-levels {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.traversal-order-item,
+.traversal-level {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 5px 7px;
+}
+
+.traversal-level {
+  align-items: flex-start;
+}
+
+.traversal-step-label {
+  min-width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  background: rgba(148, 163, 184, 0.22);
+  color: #cbd5e1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.traversal-group {
+  display: inline-flex;
+  gap: 5px;
+}
+
+.traversal-node {
+  min-width: 28px;
+  height: 24px;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #111827;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.traversal-active {
+  border-color: rgba(250, 204, 21, 0.85);
+  background: rgba(113, 63, 18, 0.82);
+}
+
+.traversal-active .traversal-step-label {
+  background: #facc15;
+  color: #111827;
 }
 </style>
