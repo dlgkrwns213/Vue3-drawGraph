@@ -4,21 +4,40 @@ import MinHeap from './minHeap.js';
 function makeGraph(n, lineGraph) {
   const graph = Array(n + 1).fill().map(() => []);
 
-  for (const [u, v, rawWeight] of lineGraph) {
+  for (const [u, v, rawForwardWeight, rawBackwardWeight = rawForwardWeight] of lineGraph) {
     if (!Number.isInteger(u) || !Number.isInteger(v) || u < 1 || v < 1 || u > n || v > n) {
       continue;
     }
 
-    const weight = Number(rawWeight);
-    const normalizedWeight = Number.isFinite(weight) ? weight : 1;
+    const forwardWeight = normalizeWeight(rawForwardWeight);
+    const backwardWeight = normalizeWeight(rawBackwardWeight);
 
-    graph[u].push([v, normalizedWeight]);
-    graph[v].push([u, normalizedWeight]);
+    if (forwardWeight !== null) {
+      graph[u].push([v, forwardWeight]);
+    }
+
+    if (backwardWeight !== null) {
+      graph[v].push([u, backwardWeight]);
+    }
   }
 
   graph.forEach((line) => line.sort((a, b) => a[0] - b[0]));
 
   return graph;
+}
+
+function normalizeWeight(weight) {
+  if (weight === null || weight === '') {
+    return null;
+  }
+
+  const normalizedWeight = Number(weight);
+
+  if (!Number.isFinite(normalizedWeight) || normalizedWeight < 0) {
+    return null;
+  }
+
+  return normalizedWeight;
 }
 
 function bfs(nodes, lineGraph, startIdx = 1) {
