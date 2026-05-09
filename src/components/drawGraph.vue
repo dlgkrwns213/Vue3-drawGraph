@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, ref } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { bfs, dfs, dijkstra } from '../utils/functions.js';
 
 const TOOLBAR_HEIGHT = 100;
@@ -34,6 +34,11 @@ const activeResultStep = ref(-1);
 const graphInput = ref('5 5\n1 2 3\n1 3 2\n2 4 4\n3 4 1\n4 5 6');
 const graphInputMode = ref('undirected');
 const animationDelay = ref(500);
+const STORAGE_KEY = 'graph-editor-saved-graphs';
+const savedGraphs = ref(loadSavedGraphs());
+const activeGraphId = ref(null);
+const isRestoringSavedGraph = ref(false);
+let autoSaveTimer = null;
 
 const hasNodes = computed(() => nodes.value.length > 0);
 const selectedNodeId = computed(() => (
@@ -101,7 +106,6 @@ function applyGraphInput() {
     edgeId += 1;
   }
 
-  const before = createGraphSnapshot();
   const after = {
     nodes: arrangedNodes,
     lines: nextLines,
@@ -118,12 +122,7 @@ function applyGraphInput() {
     nextEdgeId: edgeId,
   };
 
-  restoreGraphSnapshot(after);
-  pushHistory({
-    type: 'replace-graph',
-    before,
-    after: createGraphSnapshot(),
-  });
+  replaceGraphWithSnapshot(after);
 }
 
 function createGraphSnapshot() {
@@ -153,28 +152,344 @@ function createGraphSnapshot() {
 }
 
 function restoreGraphSnapshot(snapshot) {
+  const normalizedSnapshot = normalizeGraphSnapshot(snapshot);
   cancelCurrentLine();
-  nodes.value = snapshot.nodes.map(node => ({ ...node }));
-  lines.value = snapshot.lines.map(line => ({ ...line }));
-  inputFields.value = snapshot.inputFields.map(input => ({ ...input }));
-  graphConnections.value = snapshot.graphConnections.map(connection => [...connection]);
-  nodeOrders.value = { ...snapshot.nodeOrders };
-  nodeDistances.value = { ...snapshot.nodeDistances };
-  nodeSelecting.value = [...snapshot.nodeSelecting];
-  nodeSelected.value = [...snapshot.nodeSelected];
-  startIdx.value = snapshot.startIdx;
-  hoveredWeight.value = snapshot.hoveredWeight ? { ...snapshot.hoveredWeight } : null;
-  traversalResult.value = snapshot.traversalResult
+  nodes.value = normalizedSnapshot.nodes.map(node => ({ ...node }));
+  lines.value = normalizedSnapshot.lines.map(line => ({ ...line }));
+  inputFields.value = normalizedSnapshot.inputFields.map(input => ({ ...input }));
+  graphConnections.value = normalizedSnapshot.graphConnections.map(connection => [...connection]);
+  nodeOrders.value = { ...normalizedSnapshot.nodeOrders };
+  nodeDistances.value = { ...normalizedSnapshot.nodeDistances };
+  nodeSelecting.value = [...normalizedSnapshot.nodeSelecting];
+  nodeSelected.value = [...normalizedSnapshot.nodeSelected];
+  startIdx.value = normalizedSnapshot.startIdx;
+  hoveredWeight.value = normalizedSnapshot.hoveredWeight ? { ...normalizedSnapshot.hoveredWeight } : null;
+  traversalResult.value = normalizedSnapshot.traversalResult
     ? {
-        ...snapshot.traversalResult,
-        distances: snapshot.traversalResult.distances ? { ...snapshot.traversalResult.distances } : null,
-        sequence: snapshot.traversalResult.isGrouped
-          ? snapshot.traversalResult.sequence.map(group => [...group])
-          : [...snapshot.traversalResult.sequence],
+        ...normalizedSnapshot.traversalResult,
+        distances: normalizedSnapshot.traversalResult.distances ? { ...normalizedSnapshot.traversalResult.distances } : null,
+        sequence: normalizedSnapshot.traversalResult.isGrouped
+          ? normalizedSnapshot.traversalResult.sequence.map(group => [...group])
+          : [...normalizedSnapshot.traversalResult.sequence],
       }
     : null;
-  activeResultStep.value = snapshot.activeResultStep;
-  nextEdgeId.value = snapshot.nextEdgeId;
+  activeResultStep.value = normalizedSnapshot.activeResultStep;
+  nextEdgeId.value = normalizedSnapshot.nextEdgeId;
+}
+
+function createGraphSlot() {
+  if (isProcessing.value) return;
+
+  autoSaveCurrentGraph();
+
+  const slot = createSavedGraphRecord(createEmptyGraphSnapshot());
+  savedGraphs.value.unshift(slot);
+  activeGraphId.value = slot.id;
+  restoreSavedGraph(slot);
+  persistSavedGraphs();
+}
+
+function deleteSavedGraph(graphId) {
+  if (isProcessing.value) return;
+
+  const wasActive = activeGraphId.value === graphId;
+  savedGraphs.value = savedGraphs.value.filter(graph => graph.id !== graphId);
+
+  if (wasActive) {
+    const nextGraph = savedGraphs.value[0];
+
+    if (nextGraph) {
+      activeGraphId.value = nextGraph.id;
+      restoreSavedGraph(nextGraph);
+    } else {
+      activeGraphId.value = null;
+      restoreSavedGraph({ snapshot: createEmptyGraphSnapshot() });
+    }
+  }
+
+  persistSavedGraphs();
+}
+
+function switchSavedGraph(graph) {
+  if (isProcessing.value) return;
+  if (graph.id === activeGraphId.value) return;
+
+  autoSaveCurrentGraph();
+  activeGraphId.value = graph.id;
+  restoreSavedGraph(graph);
+}
+
+function autoSaveCurrentGraph() {
+  const snapshot = createGraphSnapshot();
+
+  if (!activeGraphId.value && !hasSnapshotContent(snapshot)) return;
+
+  autoSaveGraphSnapshot(snapshot);
+}
+
+function scheduleAutoSave(snapshot) {
+  window.clearTimeout(autoSaveTimer);
+  autoSaveTimer = window.setTimeout(() => {
+    autoSaveGraphSnapshot(snapshot);
+  }, 180);
+}
+
+function autoSaveGraphSnapshot(snapshot) {
+  if (isRestoringSavedGraph.value || isProcessing.value) return;
+  if (!activeGraphId.value && !hasSnapshotContent(snapshot)) return;
+
+  const slot = ensureActiveGraphSlot(snapshot);
+  slot.snapshot = normalizeGraphSnapshot(snapshot);
+  slot.history = createHistorySnapshot();
+  slot.updatedAt = new Date().toISOString();
+  persistSavedGraphs();
+}
+
+function hasSnapshotContent(snapshot) {
+  return snapshot.nodes.length > 0 || snapshot.graphConnections.length > 0;
+}
+
+function ensureActiveGraphSlot(snapshot = createEmptyGraphSnapshot()) {
+  let slot = savedGraphs.value.find(graph => graph.id === activeGraphId.value);
+
+  if (!slot) {
+    slot = createSavedGraphRecord(snapshot);
+    savedGraphs.value.unshift(slot);
+    activeGraphId.value = slot.id;
+  }
+
+  return slot;
+}
+
+function createSavedGraphRecord(snapshot) {
+  const graphNumber = savedGraphs.value.length + 1;
+
+  return {
+    id: `graph-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    name: `Graph ${graphNumber}`,
+    updatedAt: new Date().toISOString(),
+    snapshot: normalizeGraphSnapshot(snapshot),
+    history: createEmptyHistorySnapshot(),
+  };
+}
+
+function restoreSavedGraph(graph) {
+  window.clearTimeout(autoSaveTimer);
+  isRestoringSavedGraph.value = true;
+  restoreGraphSnapshot(graph.snapshot);
+  const history = normalizeHistorySnapshot(graph.history);
+  userDone.value = history.userDone;
+  redoStack.value = history.redoStack;
+  isRestoringSavedGraph.value = false;
+}
+
+function createEmptyHistorySnapshot() {
+  return {
+    userDone: [],
+    redoStack: [],
+  };
+}
+
+function createHistorySnapshot() {
+  return {
+    userDone: cloneHistoryStack(userDone.value),
+    redoStack: cloneHistoryStack(redoStack.value),
+  };
+}
+
+function normalizeHistorySnapshot(history = createEmptyHistorySnapshot()) {
+  return {
+    userDone: cloneHistoryStack(history.userDone ?? []),
+    redoStack: cloneHistoryStack(history.redoStack ?? []),
+  };
+}
+
+function cloneHistoryStack(stack) {
+  return stack.map(action => normalizeHistoryAction(cloneValue(action)));
+}
+
+function normalizeHistoryAction(action) {
+  if (!action) return action;
+
+  if (action.before) {
+    action.before = normalizeGraphSnapshot(action.before);
+  }
+
+  if (action.after) {
+    action.after = normalizeGraphSnapshot(action.after);
+  }
+
+  if (action.nodeOrder === null) {
+    action.nodeOrder = Number.NaN;
+  }
+
+  return action;
+}
+
+function cloneValue(value) {
+  if (value === null || typeof value !== 'object') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(item => cloneValue(item));
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, cloneValue(item)]),
+  );
+}
+
+function replaceGraphWithSnapshot(nextSnapshot) {
+  const before = createGraphSnapshot();
+  restoreGraphSnapshot(nextSnapshot);
+  pushHistory({
+    type: 'replace-graph',
+    before,
+    after: createGraphSnapshot(),
+  });
+}
+
+function createEmptyGraphSnapshot() {
+  return {
+    nodes: [],
+    lines: [],
+    inputFields: [],
+    graphConnections: [],
+    nodeOrders: {},
+    nodeDistances: {},
+    nodeSelecting: [],
+    nodeSelected: [],
+    startIdx: -1,
+    hoveredWeight: null,
+    traversalResult: null,
+    activeResultStep: -1,
+    nextEdgeId: 1,
+  };
+}
+
+function normalizeGraphSnapshot(snapshot = {}) {
+  const empty = createEmptyGraphSnapshot();
+  const traversal = snapshot.traversalResult ?? null;
+  const nodeOrderEntries = Object.entries(snapshot.nodeOrders ?? empty.nodeOrders)
+    .map(([key, value]) => [key, value === null ? Number.NaN : value]);
+
+  return {
+    nodes: (snapshot.nodes ?? empty.nodes).map(node => ({ ...node })),
+    lines: (snapshot.lines ?? empty.lines).map(line => ({ ...line })),
+    inputFields: (snapshot.inputFields ?? empty.inputFields).map(input => ({ ...input })),
+    graphConnections: (snapshot.graphConnections ?? empty.graphConnections).map(connection => [...connection]),
+    nodeOrders: Object.fromEntries(nodeOrderEntries),
+    nodeDistances: { ...(snapshot.nodeDistances ?? empty.nodeDistances) },
+    nodeSelecting: [...(snapshot.nodeSelecting ?? empty.nodeSelecting)],
+    nodeSelected: [...(snapshot.nodeSelected ?? empty.nodeSelected)],
+    startIdx: snapshot.startIdx ?? empty.startIdx,
+    hoveredWeight: snapshot.hoveredWeight ? { ...snapshot.hoveredWeight } : null,
+    traversalResult: traversal
+      ? {
+          ...traversal,
+          distances: traversal.distances ? { ...traversal.distances } : null,
+          sequence: traversal.isGrouped
+            ? (traversal.sequence ?? []).map(group => [...group])
+            : [...(traversal.sequence ?? [])],
+        }
+      : null,
+    activeResultStep: snapshot.activeResultStep ?? empty.activeResultStep,
+    nextEdgeId: snapshot.nextEdgeId ?? empty.nextEdgeId,
+  };
+}
+
+function getSavedGraphTitle(graph, index) {
+  return graph.name || `Graph ${index + 1}`;
+}
+
+function getSavedGraphMeta(graph) {
+  const snapshot = normalizeGraphSnapshot(graph.snapshot);
+  return `${snapshot.nodes.length}N ${snapshot.graphConnections.length}E`;
+}
+
+function getPreviewBounds(snapshot) {
+  const graphSnapshot = normalizeGraphSnapshot(snapshot);
+  const xs = graphSnapshot.nodes.map(node => node.x);
+  const ys = graphSnapshot.nodes.map(node => node.y);
+
+  if (xs.length === 0) {
+    return { minX: 0, minY: 0, width: 1, height: 1 };
+  }
+
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+
+  return {
+    minX,
+    minY,
+    width: Math.max(maxX - minX, 1),
+    height: Math.max(maxY - minY, 1),
+  };
+}
+
+function mapPreviewPoint(point, bounds) {
+  const previewWidth = 120;
+  const previewHeight = 88;
+  const padding = 13;
+  const scale = Math.min(
+    (previewWidth - padding * 2) / bounds.width,
+    (previewHeight - padding * 2) / bounds.height,
+  );
+  const graphWidth = bounds.width * scale;
+  const graphHeight = bounds.height * scale;
+  const offsetX = (previewWidth - graphWidth) / 2;
+  const offsetY = (previewHeight - graphHeight) / 2;
+
+  return {
+    x: offsetX + (point.x - bounds.minX) * scale,
+    y: offsetY + (point.y - bounds.minY) * scale,
+  };
+}
+
+function getPreviewNodes(snapshot) {
+  const graphSnapshot = normalizeGraphSnapshot(snapshot);
+  const bounds = getPreviewBounds(graphSnapshot);
+
+  return graphSnapshot.nodes.map(node => ({
+    ...node,
+    ...mapPreviewPoint(node, bounds),
+  }));
+}
+
+function getPreviewEdges(snapshot) {
+  const graphSnapshot = normalizeGraphSnapshot(snapshot);
+  const bounds = getPreviewBounds(graphSnapshot);
+  const nodeMap = new Map(graphSnapshot.nodes.map(node => [node.id, node]));
+
+  return graphSnapshot.graphConnections
+    .map(([from, to]) => {
+      const fromNode = nodeMap.get(from);
+      const toNode = nodeMap.get(to);
+
+      if (!fromNode || !toNode) return null;
+
+      return {
+        from: mapPreviewPoint(fromNode, bounds),
+        to: mapPreviewPoint(toNode, bounds),
+      };
+    })
+    .filter(Boolean);
+}
+
+function loadSavedGraphs() {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(STORAGE_KEY) || '[]');
+    return Array.isArray(saved) ? saved : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistSavedGraphs() {
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(savedGraphs.value));
 }
 
 function parseGraphInput(rawInput) {
@@ -1167,7 +1482,17 @@ function normalizeStartNode() {
   }
 }
 
+watch(
+  () => createGraphSnapshot(),
+  (snapshot) => {
+    if (isRestoringSavedGraph.value) return;
+    scheduleAutoSave(snapshot);
+  },
+  { deep: true },
+);
+
 onBeforeUnmount(() => {
+  window.clearTimeout(autoSaveTimer);
   window.removeEventListener('mousemove', drawLine);
   window.removeEventListener('mousemove', dragNode);
   window.removeEventListener('mouseup', stopNodeDrag);
@@ -1246,6 +1571,58 @@ onBeforeUnmount(() => {
       <button class="graph-input-apply" type="button" @click="applyGraphInput">
         Draw
       </button>
+    </section>
+
+    <section class="saved-graphs-panel" aria-label="saved graphs">
+      <div class="saved-graphs-header">
+        <strong>Graph Slots</strong>
+        <button type="button" aria-label="create graph slot" @click="createGraphSlot">+</button>
+      </div>
+      <div class="saved-grid">
+        <div v-if="savedGraphs.length === 0" class="saved-empty">
+          Change the graph to create a slot
+        </div>
+        <div
+          v-for="(graph, index) in savedGraphs"
+          :key="graph.id"
+          class="saved-card-wrap"
+        >
+          <button
+            class="saved-card"
+            :class="{ active: graph.id === activeGraphId }"
+            type="button"
+            @click="switchSavedGraph(graph)"
+          >
+            <svg class="saved-preview" viewBox="0 0 120 88" aria-hidden="true">
+              <line
+                v-for="(edge, edgeIndex) in getPreviewEdges(graph.snapshot)"
+                :key="edgeIndex"
+                :x1="edge.from.x"
+                :y1="edge.from.y"
+                :x2="edge.to.x"
+                :y2="edge.to.y"
+              />
+              <g
+                v-for="node in getPreviewNodes(graph.snapshot)"
+                :key="node.id"
+              >
+                <circle :cx="node.x" :cy="node.y" r="6" />
+                <text :x="node.x" :y="node.y + 2">{{ node.id }}</text>
+              </g>
+            </svg>
+            <span>{{ getSavedGraphTitle(graph, index) }}</span>
+            <small>{{ getSavedGraphMeta(graph) }}</small>
+          </button>
+          <button
+            class="saved-card-delete"
+            type="button"
+            aria-label="delete saved graph"
+            @click.stop="deleteSavedGraph(graph.id)"
+          >
+            x
+          </button>
+        </div>
+      </div>
     </section>
 
     <svg class="graph-canvas" @click="handleClick">
@@ -1514,6 +1891,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .graph-editor {
+  --saved-panel-width: 168px;
   width: 100vw;
   height: 100vh;
   position: relative;
@@ -1603,7 +1981,7 @@ onBeforeUnmount(() => {
   z-index: 99;
   position: absolute;
   top: 110px;
-  right: 10px;
+  right: calc(var(--saved-panel-width) + 12px);
   display: flex;
   gap: 8px;
 }
@@ -1732,6 +2110,165 @@ onBeforeUnmount(() => {
 
 .graph-input-apply:hover {
   background: #1d4ed8;
+}
+
+.saved-graphs-panel {
+  z-index: 90;
+  position: absolute;
+  top: 100px;
+  right: 0;
+  bottom: 0;
+  width: var(--saved-panel-width);
+  border-left: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(15, 18, 24, 0.94);
+  color: white;
+  padding: 12px;
+  box-shadow: -12px 0 30px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+
+.saved-graphs-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.saved-graphs-header strong {
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.saved-graphs-header button,
+.saved-card-delete {
+  border: 0;
+  border-radius: 7px;
+  background: #374151;
+  color: white;
+  font-size: 16px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.saved-graphs-header button {
+  width: 32px;
+  height: 32px;
+  background: #2563eb;
+}
+
+.saved-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-content: start;
+  gap: 10px;
+  height: calc(100% - 44px);
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.saved-empty {
+  grid-column: 1 / -1;
+  border: 1px dashed rgba(148, 163, 184, 0.28);
+  border-radius: 7px;
+  color: #94a3b8;
+  padding: 18px 12px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.saved-card-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.saved-card {
+  width: 100%;
+  aspect-ratio: 1;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.055);
+  color: white;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 8px;
+  text-align: left;
+  overflow: hidden;
+}
+
+.saved-card.active {
+  border-color: rgba(248, 113, 113, 0.9);
+  box-shadow: inset 0 0 0 1px rgba(248, 113, 113, 0.55);
+  background: rgba(127, 29, 29, 0.28);
+}
+
+.saved-card:hover {
+  border-color: rgba(96, 165, 250, 0.55);
+  background: rgba(59, 130, 246, 0.16);
+}
+
+.saved-card span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.saved-card small {
+  color: #9ca3af;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.saved-preview {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+}
+
+.saved-preview line {
+  stroke: rgba(203, 213, 225, 0.74);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+}
+
+.saved-preview circle {
+  fill: #60a5fa;
+  stroke: rgba(15, 23, 42, 0.95);
+  stroke-width: 2;
+}
+
+.saved-preview text {
+  fill: white;
+  font-size: 7px;
+  font-weight: 900;
+  dominant-baseline: middle;
+  text-anchor: middle;
+}
+
+.saved-card-delete {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(127, 29, 29, 0.8);
+  color: #fecaca;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.saved-card-wrap:hover .saved-card-delete,
+.saved-card-delete:focus-visible {
+  opacity: 1;
 }
 
 .graph-canvas {
