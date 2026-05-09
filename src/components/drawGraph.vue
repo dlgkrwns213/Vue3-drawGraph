@@ -1,6 +1,15 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
-import { bfs, dfs, dijkstra } from '../utils/functions.js';
+import {
+  bellmanFord,
+  bfs,
+  dfs,
+  dijkstra,
+  floydWarshall,
+  kruskal,
+  prim,
+  topologicalSort,
+} from '../utils/functions.js';
 
 const TOOLBAR_HEIGHT = 100;
 const NODE_RADIUS = 25;
@@ -40,6 +49,7 @@ const savedGraphs = ref(loadSavedGraphs());
 const activeGraphId = ref(null);
 const isRestoringSavedGraph = ref(false);
 const isHelpOpen = ref(false);
+const isGraphInputCollapsed = ref(false);
 let autoSaveTimer = null;
 
 const hasNodes = computed(() => nodes.value.length > 0);
@@ -143,6 +153,8 @@ function createGraphSnapshot() {
       ? {
           ...traversalResult.value,
           distances: traversalResult.value.distances ? { ...traversalResult.value.distances } : null,
+          details: traversalResult.value.details ? [...traversalResult.value.details] : null,
+          matrix: traversalResult.value.matrix ? cloneValue(traversalResult.value.matrix) : null,
           sequence: traversalResult.value.isGrouped
             ? traversalResult.value.sequence.map(group => [...group])
             : [...traversalResult.value.sequence],
@@ -170,6 +182,8 @@ function restoreGraphSnapshot(snapshot) {
     ? {
         ...normalizedSnapshot.traversalResult,
         distances: normalizedSnapshot.traversalResult.distances ? { ...normalizedSnapshot.traversalResult.distances } : null,
+        details: normalizedSnapshot.traversalResult.details ? [...normalizedSnapshot.traversalResult.details] : null,
+        matrix: normalizedSnapshot.traversalResult.matrix ? cloneValue(normalizedSnapshot.traversalResult.matrix) : null,
         sequence: normalizedSnapshot.traversalResult.isGrouped
           ? normalizedSnapshot.traversalResult.sequence.map(group => [...group])
           : [...normalizedSnapshot.traversalResult.sequence],
@@ -391,6 +405,8 @@ function normalizeGraphSnapshot(snapshot = {}) {
       ? {
           ...traversal,
           distances: traversal.distances ? { ...traversal.distances } : null,
+          details: traversal.details ? [...traversal.details] : null,
+          matrix: traversal.matrix ? cloneValue(traversal.matrix) : null,
           sequence: traversal.isGrouped
             ? (traversal.sequence ?? []).map(group => [...group])
             : [...(traversal.sequence ?? [])],
@@ -713,6 +729,7 @@ function clamp(value, min, max) {
 
 function relaxNodePositions(anchorIndex) {
   const rect = graphRoot.value.getBoundingClientRect();
+  let didMoveAnyNode = false;
 
   for (let step = 0; step < RELAXATION_STEPS; step += 1) {
     let moved = false;
@@ -749,10 +766,15 @@ function relaxNodePositions(anchorIndex) {
         }
 
         moved = true;
+        didMoveAnyNode = true;
       }
     }
 
     if (!moved) break;
+  }
+
+  if (didMoveAnyNode) {
+    updateAllLines();
   }
 }
 
@@ -929,7 +951,7 @@ function parseWeight(value) {
   }
 
   const parsed = Number(trimmed);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DISABLED_WEIGHT;
+  return Number.isFinite(parsed) ? parsed : DISABLED_WEIGHT;
 }
 
 function drawLine(event) {
@@ -954,6 +976,11 @@ function handleMouseDown(event) {
 
 function deleteNode(index) {
   if (isProcessing.value) return;
+
+  if (selectedNode.value !== null || currentLine.value !== null) {
+    cancelCurrentLine();
+    return;
+  }
 
   const node = nodes.value[index];
   if (!node) return;
@@ -1362,6 +1389,10 @@ async function clickDFSButton() {
 
 async function clickDijkstraButton() {
   if (!canRunAlgorithm()) return;
+  if (hasNegativeWeight()) {
+    alert('Dijkstra는 음수 가중치에서 사용할 수 없습니다. Bellman-Ford를 사용하세요.');
+    return;
+  }
 
   await runAlgorithm(async () => {
     const { order, distances } = dijkstra(nodes.value, graphConnections.value, startIdx.value);
@@ -1371,12 +1402,113 @@ async function clickDijkstraButton() {
   });
 }
 
-function setTraversalResult(label, sequence, isGrouped = false, distances = null) {
+async function clickBellmanFordButton() {
+  if (!canRunAlgorithm()) return;
+
+  await runAlgorithm(async () => {
+    const { order, distances, hasNegativeCycle } = bellmanFord(nodes.value, graphConnections.value, startIdx.value);
+    nodeDistances.value = normalizeDistances(distances);
+    setTraversalResult(
+      'Bellman-Ford',
+      order,
+      false,
+      nodeDistances.value,
+      hasNegativeCycle ? ['음수 사이클이 감지되었습니다. 최단거리 결과가 유효하지 않을 수 있습니다.'] : null,
+    );
+    await colorNodes(order);
+  });
+}
+
+async function clickFloydWarshallButton() {
+  if (!canRunAlgorithm()) return;
+
+  await runAlgorithm(async () => {
+    const { order, distances, hasNegativeCycle } = floydWarshall(nodes.value, graphConnections.value);
+    const matrix = normalizeDistanceMatrix(distances);
+    const startDistances = Object.fromEntries(nodes.value.map(node => [node.id, matrix[startIdx.value]?.[node.id] ?? '∞']));
+    nodeDistances.value = startDistances;
+    setTraversalResult(
+      'Floyd-Warshall',
+      order,
+      false,
+      startDistances,
+      hasNegativeCycle ? ['음수 사이클이 감지되었습니다. 최단거리 결과가 유효하지 않을 수 있습니다.'] : null,
+      matrix,
+    );
+    await colorNodes(order);
+  });
+}
+
+async function clickKruskalButton() {
+  if (!canRunAlgorithm()) return;
+
+  await runAlgorithm(async () => {
+    const { order, edges, totalWeight, isConnected } = kruskal(nodes.value, graphConnections.value);
+    const metrics = buildOrderMetrics(order);
+    nodeDistances.value = metrics;
+    setTraversalResult(
+      'Kruskal MST',
+      order,
+      false,
+      metrics,
+      [
+        `선택 간선: ${formatEdgeList(edges) || '없음'}`,
+        `총 가중치: ${totalWeight}`,
+        isConnected ? '모든 노드가 연결되었습니다.' : '그래프가 연결되어 있지 않아 MST 대신 최소 신장 숲을 표시합니다.',
+      ],
+    );
+    await colorNodes(order);
+  });
+}
+
+async function clickPrimButton() {
+  if (!canRunAlgorithm()) return;
+
+  await runAlgorithm(async () => {
+    const { order, edges, totalWeight, isConnected } = prim(nodes.value, graphConnections.value, startIdx.value);
+    const metrics = buildOrderMetrics(order);
+    nodeDistances.value = metrics;
+    setTraversalResult(
+      'Prim MST',
+      order,
+      false,
+      metrics,
+      [
+        `선택 간선: ${formatEdgeList(edges) || '없음'}`,
+        `총 가중치: ${totalWeight}`,
+        isConnected ? '모든 노드가 연결되었습니다.' : '루트에서 닿을 수 없는 노드가 있어 부분 MST만 표시합니다.',
+      ],
+    );
+    await colorNodes(order);
+  });
+}
+
+async function clickTopologicalSortButton() {
+  if (!canRunAlgorithm()) return;
+
+  await runAlgorithm(async () => {
+    const { order, hasCycle } = topologicalSort(nodes.value, graphConnections.value);
+    const metrics = buildOrderMetrics(order);
+    nodeDistances.value = metrics;
+    setTraversalResult(
+      'Topological Sort',
+      order,
+      false,
+      metrics,
+      hasCycle ? ['사이클이 감지되어 전체 위상 정렬을 만들 수 없습니다.'] : ['DAG 위상 정렬이 완료되었습니다.'],
+    );
+    await colorNodes(order);
+  });
+}
+
+function setTraversalResult(label, sequence, isGrouped = false, distances = null, details = null, matrix = null) {
   traversalResult.value = {
     label,
     isGrouped,
     sequence: isGrouped ? sequence.map(group => [...group]) : [...sequence],
     distances: distances ? { ...distances } : null,
+    details: details ? [...details] : null,
+    matrix: matrix ? cloneValue(matrix) : null,
   };
   activeResultStep.value = -1;
 }
@@ -1402,6 +1534,23 @@ function buildBfsLevelMetrics(levels) {
 
 function buildOrderMetrics(order) {
   return Object.fromEntries(order.map((nodeId, index) => [nodeId, index]));
+}
+
+function normalizeDistanceMatrix(matrix) {
+  return Object.fromEntries(Object.entries(matrix).map(([from, row]) => [
+    from,
+    normalizeDistances(row),
+  ]));
+}
+
+function formatEdgeList(edges) {
+  return edges.map(edge => `${edge.from}-${edge.to}(${edge.weight})`).join(', ');
+}
+
+function hasNegativeWeight() {
+  return graphConnections.value.some(connection => {
+    return [connection[2], connection[3]].some(weight => weight !== DISABLED_WEIGHT && Number(weight) < 0);
+  });
 }
 
 function canRunAlgorithm() {
@@ -1526,23 +1675,54 @@ onBeforeUnmount(() => {
 
     <div class="graph-toolbar">
       <h1>Graph Editor</h1>
-      <button class="button" type="button" @click="clickBFSButton(false)">bfs1</button>
-      <button class="button" type="button" @click="clickBFSButton(true)">bfs2</button>
-      <button class="button" type="button" @click="clickDFSButton">dfs</button>
-      <button class="button" type="button" @click="clickDijkstraButton">dijkstra</button>
-      <label class="speed-control">
-        <span>Speed</span>
-        <input
-          v-model.number="animationDelay"
-          type="range"
-          min="0"
-          max="1500"
-          step="20"
-          aria-label="animation delay"
-        />
-        <output>{{ animationDelay }}ms</output>
-      </label>
+      <div class="algorithm-groups" aria-label="algorithm controls">
+        <section class="algorithm-group">
+          <span>Search</span>
+          <div class="algorithm-buttons">
+            <button class="algorithm-button" type="button" @click="clickBFSButton(false)">BFS Order</button>
+            <button class="algorithm-button" type="button" @click="clickBFSButton(true)">BFS Level</button>
+            <button class="algorithm-button" type="button" @click="clickDFSButton">DFS</button>
+          </div>
+        </section>
+
+        <section class="algorithm-group">
+          <span>Shortest Path</span>
+          <div class="algorithm-buttons">
+            <button class="algorithm-button" type="button" @click="clickDijkstraButton">Dijkstra</button>
+            <button class="algorithm-button" type="button" @click="clickBellmanFordButton">Bellman-Ford</button>
+            <button class="algorithm-button" type="button" @click="clickFloydWarshallButton">Floyd-Warshall</button>
+          </div>
+        </section>
+
+        <section class="algorithm-group">
+          <span>MST</span>
+          <div class="algorithm-buttons">
+            <button class="algorithm-button" type="button" @click="clickKruskalButton">Kruskal</button>
+            <button class="algorithm-button" type="button" @click="clickPrimButton">Prim</button>
+          </div>
+        </section>
+
+        <section class="algorithm-group">
+          <span>Ordering</span>
+          <div class="algorithm-buttons">
+            <button class="algorithm-button" type="button" @click="clickTopologicalSortButton">Topological Sort</button>
+          </div>
+        </section>
+      </div>
     </div>
+
+    <label class="speed-control">
+      <span>Speed</span>
+      <input
+        v-model.number="animationDelay"
+        type="range"
+        min="0"
+        max="1500"
+        step="20"
+        aria-label="animation delay"
+      />
+      <output>{{ animationDelay }}ms</output>
+    </label>
 
     <button class="help-open-button" type="button" @click="isHelpOpen = true">Help</button>
 
@@ -1637,7 +1817,15 @@ onBeforeUnmount(() => {
               </article>
               <article class="help-item">
                 <span class="help-action">bfs1, bfs2, dfs, dijkstra</span>
-                <p>현재 루트에서 알고리즘을 실행합니다. 결과 순서와 <code>d=</code> 값은 하단과 노드에 표시됩니다.</p>
+                <p>현재 루트에서 탐색/최단거리 알고리즘을 실행합니다. 결과 순서와 <code>d=</code> 값은 하단과 노드에 표시됩니다.</p>
+              </article>
+              <article class="help-item">
+                <span class="help-action">bellman, floyd</span>
+                <p>음수 가중치까지 고려하는 최단거리 알고리즘입니다. Floyd는 모든 노드 쌍 거리 테이블도 표시합니다.</p>
+              </article>
+              <article class="help-item">
+                <span class="help-action">kruskal, prim, topo</span>
+                <p>MST와 위상 정렬을 실행합니다. 선택 간선, 총 가중치, 사이클 여부는 하단 상세 정보로 표시됩니다.</p>
               </article>
               <article class="help-item">
                 <span class="help-action">Speed 바</span>
@@ -1780,10 +1968,25 @@ onBeforeUnmount(() => {
       <span>{{ statusText }}</span>
     </div>
 
-    <section class="graph-input-panel" aria-label="graph text input">
+    <section
+      class="graph-input-panel"
+      :class="{ collapsed: isGraphInputCollapsed }"
+      aria-label="graph text input"
+    >
       <div class="graph-input-header">
         <strong>Input Graph</strong>
-        <div class="direction-toggle" aria-label="edge direction mode">
+        <button
+          class="graph-input-toggle"
+          type="button"
+          @click="isGraphInputCollapsed = !isGraphInputCollapsed"
+        >
+          {{ isGraphInputCollapsed ? 'Show' : 'Hide' }}
+        </button>
+        <div
+          v-if="!isGraphInputCollapsed"
+          class="direction-toggle"
+          aria-label="edge direction mode"
+        >
           <button
             type="button"
             :class="{ active: graphInputMode === 'undirected' }"
@@ -1800,14 +2003,16 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
-      <textarea
-        v-model="graphInput"
-        spellcheck="false"
-        aria-label="graph input as n m then edges"
-      ></textarea>
-      <button class="graph-input-apply" type="button" @click="applyGraphInput">
-        Draw
-      </button>
+      <template v-if="!isGraphInputCollapsed">
+        <textarea
+          v-model="graphInput"
+          spellcheck="false"
+          aria-label="graph input as n m then edges"
+        ></textarea>
+        <button class="graph-input-apply" type="button" @click="applyGraphInput">
+          Draw
+        </button>
+      </template>
     </section>
 
     <section class="saved-graphs-panel" aria-label="saved graphs">
@@ -2122,6 +2327,38 @@ onBeforeUnmount(() => {
           {{ node.id }}: {{ traversalResult.distances[node.id] }}
         </span>
       </div>
+
+      <div v-if="traversalResult.details" class="algorithm-details">
+        <span
+          v-for="(detail, detailIndex) in traversalResult.details"
+          :key="`detail-${detailIndex}`"
+        >
+          {{ detail }}
+        </span>
+      </div>
+
+      <div v-if="traversalResult.matrix" class="matrix-summary">
+        <table>
+          <thead>
+            <tr>
+              <th>from/to</th>
+              <th v-for="node in nodes" :key="`matrix-head-${node.id}`">{{ node.id }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="fromNode in nodes" :key="`matrix-row-${fromNode.id}`">
+              <th>{{ fromNode.id }}</th>
+              <td
+                v-for="toNode in nodes"
+                :key="`matrix-cell-${fromNode.id}-${toNode.id}`"
+                :class="{ unreachable: traversalResult.matrix[fromNode.id]?.[toNode.id] === '∞' }"
+              >
+                {{ traversalResult.matrix[fromNode.id]?.[toNode.id] }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </section>
   </div>
 </template>
@@ -2137,6 +2374,7 @@ onBeforeUnmount(() => {
 }
 
 .graph-toolbar {
+  box-sizing: border-box;
   width: 100%;
   height: 100px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.09);
@@ -2145,12 +2383,19 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 20px;
+  padding: 8px 20px;
   overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.graph-toolbar * {
+  box-sizing: border-box;
 }
 
 .graph-toolbar h1 {
-  margin: 0 20px 0 0;
+  flex: 0 0 auto;
+  align-self: center;
+  margin: 0 12px 0 0;
   color: white;
   font-size: 24px;
   font-weight: 600;
@@ -2165,19 +2410,59 @@ onBeforeUnmount(() => {
   pointer-events: all;
 }
 
-.button {
-  width: 128px;
-  height: 48px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+.algorithm-groups {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 80px;
+}
+
+.algorithm-group {
+  display: grid;
+  grid-template-rows: 12px 52px;
+  gap: 4px;
+  min-width: 0;
+  height: 80px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
   border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  padding: 5px 7px;
+}
+
+.algorithm-group > span {
+  display: flex;
+  align-items: center;
+  color: #93c5fd;
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 12px;
+}
+
+.algorithm-buttons {
+  display: grid;
+  grid-template-rows: repeat(2, 24px);
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(90px, auto);
+  gap: 4px;
+}
+
+.algorithm-button {
+  min-width: 0;
+  height: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
   background-color: #30343b;
   color: #e5e7eb;
-  font-size: 16px;
-  font-weight: 700;
+  padding: 0 7px;
+  font-size: 11px;
+  font-weight: 850;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
 }
 
-.button:hover,
+.algorithm-button:hover,
 .history-button:hover {
   border-color: rgba(96, 165, 250, 0.55);
   background-color: #394150;
@@ -2205,7 +2490,11 @@ onBeforeUnmount(() => {
 }
 
 .speed-control {
-  flex: 0 0 260px;
+  z-index: 90;
+  position: absolute;
+  top: 110px;
+  right: calc(var(--saved-panel-width) + 12px);
+  width: 280px;
   height: 48px;
   display: grid;
   grid-template-columns: auto 1fr auto;
@@ -2425,7 +2714,7 @@ onBeforeUnmount(() => {
 .history-buttons {
   z-index: 99;
   position: absolute;
-  top: 110px;
+  top: 166px;
   right: calc(var(--saved-panel-width) + 12px);
   display: flex;
   gap: 8px;
@@ -2485,6 +2774,11 @@ onBeforeUnmount(() => {
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
 }
 
+.graph-input-panel.collapsed {
+  width: 168px;
+  padding: 8px 10px;
+}
+
 .graph-input-header {
   display: flex;
   align-items: center;
@@ -2493,9 +2787,29 @@ onBeforeUnmount(() => {
   margin-bottom: 8px;
 }
 
+.graph-input-panel.collapsed .graph-input-header {
+  margin-bottom: 0;
+}
+
 .graph-input-header strong {
   font-size: 13px;
   font-weight: 800;
+}
+
+.graph-input-toggle {
+  height: 26px;
+  border: 0;
+  border-radius: 7px;
+  background: #374151;
+  color: #e5e7eb;
+  padding: 0 9px;
+  font-size: 11px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.graph-input-toggle:hover {
+  background: #4b5563;
 }
 
 .direction-toggle {
@@ -3064,5 +3378,67 @@ onBeforeUnmount(() => {
 .distance-chip.unreachable {
   background: rgba(148, 163, 184, 0.14);
   color: #cbd5e1;
+}
+
+.algorithm-details {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  overflow-x: auto;
+  padding-top: 8px;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.algorithm-details span {
+  flex: 0 0 auto;
+  min-height: 24px;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.16);
+  color: #d1fae5;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.matrix-summary {
+  max-height: 160px;
+  margin-top: 10px;
+  overflow: auto;
+  padding-top: 8px;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.matrix-summary table {
+  border-collapse: collapse;
+  min-width: 100%;
+  color: #dbeafe;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.matrix-summary th,
+.matrix-summary td {
+  min-width: 42px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  padding: 5px 7px;
+  text-align: center;
+}
+
+.matrix-summary th {
+  position: sticky;
+  top: 0;
+  background: #1f2937;
+  color: #bfdbfe;
+}
+
+.matrix-summary td {
+  background: rgba(96, 165, 250, 0.09);
+}
+
+.matrix-summary td.unreachable {
+  color: #94a3b8;
+  background: rgba(148, 163, 184, 0.08);
 }
 </style>
