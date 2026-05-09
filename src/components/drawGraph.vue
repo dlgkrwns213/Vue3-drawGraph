@@ -9,6 +9,7 @@ const DRAG_START_DISTANCE = 5;
 const RELAXATION_STEPS = 8;
 const RESET_DELAY = 1000;
 const DISABLED_WEIGHT = null;
+const MAX_INPUT_NODE_COUNT = 30;
 
 const graphRoot = ref(null);
 const nodes = ref([]);
@@ -515,6 +516,17 @@ function parseGraphInput(rawInput) {
     return null;
   }
 
+  if (nodeCount > MAX_INPUT_NODE_COUNT) {
+    alert(`n은 최대 ${MAX_INPUT_NODE_COUNT}개까지 입력할 수 있습니다.`);
+    return null;
+  }
+
+  const maxEdgeCount = getMaxGraphInputEdgeCount(nodeCount);
+  if (edgeCount > maxEdgeCount) {
+    alert(`현재 모드에서 n=${nodeCount}일 때 m은 최대 ${maxEdgeCount}개까지 가능합니다.`);
+    return null;
+  }
+
   if (rows.length - 1 < edgeCount) {
     alert(`간선 ${edgeCount}개가 필요합니다.`);
     return null;
@@ -543,6 +555,14 @@ function parseGraphInput(rawInput) {
   }
 
   return { nodeCount, edges };
+}
+
+function getMaxGraphInputEdgeCount(nodeCount) {
+  if (graphInputMode.value === 'directed') {
+    return nodeCount * (nodeCount - 1);
+  }
+
+  return (nodeCount * (nodeCount - 1)) / 2;
 }
 
 function createAutoLayoutNodes(nodeCount) {
