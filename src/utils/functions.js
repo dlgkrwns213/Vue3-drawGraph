@@ -106,6 +106,7 @@ function dfsRecur(nowIdx, dfsNodeOrder, visited, graph) {
 
 function dijkstra(nodes, lineGraph, startIdx = 1) {
   const graph = makeGraph(nodes, lineGraph);
+  const nodeIds = nodes.map((node, index) => node.id ?? index + 1);
   const heap = new MinHeap();
   const distances = Array(graph.length).fill(Infinity);
   const nodeOrder = [];
@@ -135,7 +136,13 @@ function dijkstra(nodes, lineGraph, startIdx = 1) {
     }
   }
 
-  return nodeOrder;
+  return {
+    order: nodeOrder,
+    distances: Object.fromEntries(nodeIds.map(nodeId => [
+      nodeId,
+      distances[nodeId],
+    ])),
+  };
 }
 
 export { bfs, dfs, dijkstra };

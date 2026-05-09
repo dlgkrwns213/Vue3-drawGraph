@@ -24,6 +24,7 @@ const nodeSelecting = ref([]);
 const nodeSelected = ref([]);
 const isProcessing = ref(false);
 const nodeOrders = ref({});
+const nodeDistances = ref({});
 const hoveredWeight = ref(null);
 const nextEdgeId = ref(1);
 const dragState = ref(null);
@@ -107,6 +108,7 @@ function applyGraphInput() {
     inputFields: nextInputs,
     graphConnections: nextConnections,
     nodeOrders: Object.fromEntries(arrangedNodes.map(node => [node.id, Number.NaN])),
+    nodeDistances: {},
     nodeSelecting: nodeCount > 0 ? [1] : [],
     nodeSelected: [],
     startIdx: nodeCount > 0 ? 1 : -1,
@@ -131,6 +133,7 @@ function createGraphSnapshot() {
     inputFields: inputFields.value.map(input => ({ ...input })),
     graphConnections: graphConnections.value.map(connection => [...connection]),
     nodeOrders: { ...nodeOrders.value },
+    nodeDistances: { ...nodeDistances.value },
     nodeSelecting: [...nodeSelecting.value],
     nodeSelected: [...nodeSelected.value],
     startIdx: startIdx.value,
@@ -138,6 +141,7 @@ function createGraphSnapshot() {
     traversalResult: traversalResult.value
       ? {
           ...traversalResult.value,
+          distances: traversalResult.value.distances ? { ...traversalResult.value.distances } : null,
           sequence: traversalResult.value.isGrouped
             ? traversalResult.value.sequence.map(group => [...group])
             : [...traversalResult.value.sequence],
@@ -155,6 +159,7 @@ function restoreGraphSnapshot(snapshot) {
   inputFields.value = snapshot.inputFields.map(input => ({ ...input }));
   graphConnections.value = snapshot.graphConnections.map(connection => [...connection]);
   nodeOrders.value = { ...snapshot.nodeOrders };
+  nodeDistances.value = { ...snapshot.nodeDistances };
   nodeSelecting.value = [...snapshot.nodeSelecting];
   nodeSelected.value = [...snapshot.nodeSelected];
   startIdx.value = snapshot.startIdx;
@@ -162,6 +167,7 @@ function restoreGraphSnapshot(snapshot) {
   traversalResult.value = snapshot.traversalResult
     ? {
         ...snapshot.traversalResult,
+        distances: snapshot.traversalResult.distances ? { ...snapshot.traversalResult.distances } : null,
         sequence: snapshot.traversalResult.isGrouped
           ? snapshot.traversalResult.sequence.map(group => [...group])
           : [...snapshot.traversalResult.sequence],
@@ -269,6 +275,7 @@ function addNode(x, y) {
 
   nodes.value.push(node);
   nodeOrders.value[node.id] = Number.NaN;
+  delete nodeDistances.value[node.id];
   pushHistory({ type: 'node', node });
 }
 
@@ -679,6 +686,7 @@ function createDeleteNodeAction(index) {
     index,
     node: { ...nodes.value[index] },
     nodeOrder: nodeOrders.value[nodeNumber],
+    nodeDistance: nodeDistances.value[nodeNumber],
     startIdxBefore: startIdx.value,
     nodeSelectingBefore: [...nodeSelecting.value],
     nodeSelectedBefore: [...nodeSelected.value],
@@ -693,6 +701,7 @@ function applyDeleteNodeAction(action) {
   cancelCurrentLine();
   nodes.value.splice(action.index, 1);
   delete nodeOrders.value[deletedNodeNumber];
+  delete nodeDistances.value[deletedNodeNumber];
 
   lines.value = lines.value.filter((_, index) => !removedEdgeIndexes.has(index));
   inputFields.value = inputFields.value.filter((_, index) => !removedEdgeIndexes.has(index));
@@ -709,6 +718,11 @@ function applyDeleteNodeAction(action) {
 function revertDeleteNodeAction(action) {
   nodes.value.splice(action.index, 0, { ...action.node });
   nodeOrders.value[action.node.id] = action.nodeOrder;
+  if (action.nodeDistance === undefined) {
+    delete nodeDistances.value[action.node.id];
+  } else {
+    nodeDistances.value[action.node.id] = action.nodeDistance;
+  }
 
   for (const edge of action.removedEdges) {
     lines.value.splice(edge.index, 0, { ...edge.line });
@@ -914,6 +928,7 @@ function revertAction(action) {
     const node = nodes.value.pop();
     if (node) {
       delete nodeOrders.value[node.id];
+      delete nodeDistances.value[node.id];
     }
     normalizeStartNode();
     return;
@@ -949,6 +964,7 @@ function applyAction(action) {
   if (action.type === 'node') {
     nodes.value.push({ ...action.node });
     nodeOrders.value[action.node.id] = Number.NaN;
+    delete nodeDistances.value[action.node.id];
 
     if (startIdx.value === -1) {
       setStartNode(action.node.id);
@@ -989,7 +1005,9 @@ async function clickBFSButton(groupByLevel) {
 
   await runAlgorithm(async () => {
     const { levels, orderIdx } = bfs(nodes.value, graphConnections.value, startIdx.value);
-    setTraversalResult(groupByLevel ? 'BFS Level' : 'BFS', groupByLevel ? levels : orderIdx, groupByLevel);
+    const metrics = buildBfsLevelMetrics(levels);
+    nodeDistances.value = metrics;
+    setTraversalResult(groupByLevel ? 'BFS Level' : 'BFS', groupByLevel ? levels : orderIdx, groupByLevel, metrics);
     await colorNodes(groupByLevel ? levels : orderIdx, groupByLevel);
   });
 }
@@ -999,7 +1017,9 @@ async function clickDFSButton() {
 
   await runAlgorithm(async () => {
     const order = dfs(nodes.value, graphConnections.value, startIdx.value);
-    setTraversalResult('DFS', order);
+    const metrics = buildOrderMetrics(order);
+    nodeDistances.value = metrics;
+    setTraversalResult('DFS', order, false, metrics);
     await colorNodes(order);
   });
 }
@@ -1008,19 +1028,44 @@ async function clickDijkstraButton() {
   if (!canRunAlgorithm()) return;
 
   await runAlgorithm(async () => {
-    const order = dijkstra(nodes.value, graphConnections.value, startIdx.value);
-    setTraversalResult('Dijkstra', order);
+    const { order, distances } = dijkstra(nodes.value, graphConnections.value, startIdx.value);
+    nodeDistances.value = normalizeDistances(distances);
+    setTraversalResult('Dijkstra', order, false, nodeDistances.value);
     await colorNodes(order);
   });
 }
 
-function setTraversalResult(label, sequence, isGrouped = false) {
+function setTraversalResult(label, sequence, isGrouped = false, distances = null) {
   traversalResult.value = {
     label,
     isGrouped,
     sequence: isGrouped ? sequence.map(group => [...group]) : [...sequence],
+    distances: distances ? { ...distances } : null,
   };
   activeResultStep.value = -1;
+}
+
+function normalizeDistances(distances) {
+  return Object.fromEntries(Object.entries(distances).map(([nodeId, distance]) => [
+    nodeId,
+    Number.isFinite(distance) ? distance : '∞',
+  ]));
+}
+
+function buildBfsLevelMetrics(levels) {
+  const metrics = {};
+
+  for (let level = 0; level < levels.length; level += 1) {
+    for (const nodeId of levels[level]) {
+      metrics[nodeId] = level;
+    }
+  }
+
+  return metrics;
+}
+
+function buildOrderMetrics(order) {
+  return Object.fromEntries(order.map((nodeId, index) => [nodeId, index]));
 }
 
 function canRunAlgorithm() {
@@ -1030,6 +1075,7 @@ function canRunAlgorithm() {
 async function runAlgorithm(callback) {
   isProcessing.value = true;
   resetNodeOrders();
+  nodeDistances.value = {};
   nodeSelected.value = [];
   cancelCurrentLine();
 
@@ -1398,8 +1444,16 @@ onBeforeUnmount(() => {
       @contextmenu.stop.prevent="deleteNode(index)"
     >
       <div class="node-index">{{ node.id }}</div>
-      <div v-if="!Number.isNaN(nodeOrders[node.id])" class="node-order">
-        {{ nodeOrders[node.id] }}
+      <div
+        v-if="!Number.isNaN(nodeOrders[node.id]) || nodeDistances[node.id] !== undefined"
+        class="node-metrics"
+      >
+        <span v-if="!Number.isNaN(nodeOrders[node.id])" class="node-order">
+          #{{ nodeOrders[node.id] }}
+        </span>
+        <span v-if="nodeDistances[node.id] !== undefined" class="node-distance">
+          d={{ nodeDistances[node.id] }}
+        </span>
       </div>
     </div>
 
@@ -1438,7 +1492,21 @@ onBeforeUnmount(() => {
         >
           <span class="traversal-step-label">{{ orderIndex + 1 }}</span>
           <span class="traversal-node">{{ nodeId }}</span>
+          <span v-if="traversalResult.distances" class="traversal-distance">
+            d={{ traversalResult.distances[nodeId] }}
+          </span>
         </div>
+      </div>
+
+      <div v-if="traversalResult.distances" class="distance-summary">
+        <span
+          v-for="node in nodes"
+          :key="`distance-${node.id}`"
+          class="distance-chip"
+          :class="{ unreachable: traversalResult.distances[node.id] === '∞' }"
+        >
+          {{ node.id }}: {{ traversalResult.distances[node.id] }}
+        </span>
       </div>
     </section>
   </div>
@@ -1838,14 +1906,35 @@ onBeforeUnmount(() => {
   user-select: none;
 }
 
-.node-order {
+.node-metrics {
   position: absolute;
-  bottom: -18px;
+  bottom: -34px;
   left: 50%;
   transform: translateX(-50%);
-  color: #ff5656;
-  font-size: 12px;
-  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.node-order,
+.node-distance {
+  min-height: 16px;
+  border-radius: 999px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.node-order {
+  background: rgba(239, 68, 68, 0.88);
+  color: white;
+}
+
+.node-distance {
+  background: rgba(96, 165, 250, 0.92);
+  color: #07111f;
 }
 
 .traversal-panel {
@@ -1939,6 +2028,20 @@ onBeforeUnmount(() => {
   font-weight: 800;
 }
 
+.traversal-distance {
+  min-width: 34px;
+  height: 22px;
+  border-radius: 999px;
+  background: rgba(96, 165, 250, 0.2);
+  color: #bfdbfe;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .traversal-active {
   border-color: rgba(96, 165, 250, 0.95);
   background: rgba(30, 64, 175, 0.58);
@@ -1952,5 +2055,32 @@ onBeforeUnmount(() => {
 
 .traversal-active .traversal-node {
   background: #bfdbfe;
+}
+
+.distance-summary {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  overflow-x: auto;
+  padding-top: 8px;
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.distance-chip {
+  flex: 0 0 auto;
+  min-height: 24px;
+  border-radius: 999px;
+  background: rgba(96, 165, 250, 0.14);
+  color: #dbeafe;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 9px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.distance-chip.unreachable {
+  background: rgba(148, 163, 184, 0.14);
+  color: #cbd5e1;
 }
 </style>
