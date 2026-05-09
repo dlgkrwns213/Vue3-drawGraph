@@ -39,6 +39,7 @@ const STORAGE_KEY = 'graph-editor-saved-graphs';
 const savedGraphs = ref(loadSavedGraphs());
 const activeGraphId = ref(null);
 const isRestoringSavedGraph = ref(false);
+const isHelpOpen = ref(false);
 let autoSaveTimer = null;
 
 const hasNodes = computed(() => nodes.value.length > 0);
@@ -1543,6 +1544,222 @@ onBeforeUnmount(() => {
       </label>
     </div>
 
+    <button class="help-open-button" type="button" @click="isHelpOpen = true">Help</button>
+
+    <div
+      v-if="isHelpOpen"
+      class="help-backdrop"
+      role="presentation"
+      @click.self="isHelpOpen = false"
+    >
+      <section class="help-modal" role="dialog" aria-modal="true" aria-label="graph editor help">
+        <header class="help-modal-header">
+          <div>
+            <strong>Graph Editor Help</strong>
+            <span>그래프 편집 조작 설명서</span>
+          </div>
+          <button type="button" aria-label="close help" @click="isHelpOpen = false">닫기</button>
+        </header>
+
+        <div class="help-content">
+          <section class="help-section">
+            <h2>기본 조작</h2>
+            <div class="help-list">
+              <article class="help-item">
+                <span class="help-action">빈 화면 좌클릭</span>
+                <p>새 노드를 만듭니다.</p>
+              </article>
+              <article class="help-item">
+                <span class="help-action">노드 드래그</span>
+                <p>노드를 이동합니다. 가까운 노드는 자연스럽게 밀려납니다. 이동은 undo/redo에 저장되지 않습니다.</p>
+              </article>
+              <article class="help-item">
+                <span class="help-action">우클릭</span>
+                <p>현재 간선 연결 선택을 취소합니다.</p>
+              </article>
+            </div>
+          </section>
+
+          <section class="help-section">
+            <h2>루트와 간선</h2>
+            <div class="help-list">
+              <article class="help-item important">
+                <span class="help-action">Ctrl + 노드 좌클릭</span>
+                <p>알고리즘 시작 루트 노드를 해당 노드로 변경합니다.</p>
+              </article>
+              <article class="help-item">
+                <span class="help-action">노드 좌클릭 -> 다른 노드 좌클릭</span>
+                <p>두 노드를 잇는 간선을 만듭니다. 처음 찍은 노드는 선택 색상으로 표시됩니다.</p>
+              </article>
+              <article class="help-item">
+                <span class="help-action">선택한 노드 다시 좌클릭</span>
+                <p>간선 연결을 취소하고, 그 노드를 루트로 지정합니다.</p>
+              </article>
+              <article class="help-item">
+                <span class="help-action">노드 우클릭</span>
+                <p>노드를 삭제합니다. 연결된 간선도 함께 삭제되고 undo/redo에 저장됩니다.</p>
+              </article>
+              <article class="help-item">
+                <span class="help-action">간선 우클릭</span>
+                <p>해당 간선을 삭제합니다. 이 작업도 undo/redo에 저장됩니다.</p>
+              </article>
+            </div>
+          </section>
+
+          <section class="help-section">
+            <h2>가중치와 방향</h2>
+            <div class="help-list">
+              <article class="help-item important">
+                <span class="help-action">가중치 입력 후 Enter</span>
+                <p>해당 방향의 가중치를 적용합니다. Enter를 누르기 전에는 값이 확정되지 않습니다.</p>
+              </article>
+              <article class="help-item">
+                <span class="help-action">가중치 비우고 Enter</span>
+                <p>해당 방향을 비활성화해서 단방향처럼 만듭니다.</p>
+              </article>
+              <article class="help-item">
+                <span class="help-action">가중치 칸 hover</span>
+                <p>그 칸이 어떤 방향의 화살표인지 빨간 강조선으로 표시합니다.</p>
+              </article>
+            </div>
+          </section>
+
+          <section class="help-section wide">
+            <h2>입력, 실행, 저장</h2>
+            <div class="help-list compact">
+              <article class="help-item">
+                <span class="help-action">Input Graph</span>
+                <p><code>n m</code> 다음 줄부터 <code>a b w</code> 형식으로 입력합니다. <code>w</code>를 생략하면 1로 처리됩니다.</p>
+              </article>
+              <article class="help-item">
+                <span class="help-action">양방향 / 단방향</span>
+                <p>입력 그래프를 만들 때 간선을 양방향 또는 단방향으로 생성합니다.</p>
+              </article>
+              <article class="help-item">
+                <span class="help-action">bfs1, bfs2, dfs, dijkstra</span>
+                <p>현재 루트에서 알고리즘을 실행합니다. 결과 순서와 <code>d=</code> 값은 하단과 노드에 표시됩니다.</p>
+              </article>
+              <article class="help-item">
+                <span class="help-action">Speed 바</span>
+                <p>알고리즘 애니메이션 속도를 실시간으로 조절합니다.</p>
+              </article>
+              <article class="help-item">
+                <span class="help-action">Graph Slots</span>
+                <p>현재 그래프가 자동 저장됩니다. 슬롯을 누르면 전환되고, 슬롯별 undo/redo 기록도 함께 복원됩니다.</p>
+              </article>
+            </div>
+          </section>
+        </div>
+      </section>
+    </div>
+
+    <div
+      v-if="false && isHelpOpen"
+      class="help-backdrop"
+      role="presentation"
+      @click.self="isHelpOpen = false"
+    >
+      <section class="help-modal" role="dialog" aria-modal="true" aria-label="graph editor help">
+        <header class="help-modal-header">
+          <div>
+            <strong>Graph Editor Help</strong>
+            <span>그래프 편집 조작 설명서</span>
+          </div>
+          <button type="button" aria-label="close help" @click="isHelpOpen = false">x</button>
+        </header>
+
+        <div class="help-content">
+          <section>
+            <h2>기본 조작</h2>
+            <dl>
+              <div>
+                <dt>빈 화면 좌클릭</dt>
+                <dd>새 노드를 만듭니다.</dd>
+              </div>
+              <div>
+                <dt>노드 드래그</dt>
+                <dd>노드를 이동합니다. 가까운 노드는 자연스럽게 밀려납니다. 이 이동은 undo/redo에 저장되지 않습니다.</dd>
+              </div>
+              <div>
+                <dt>우클릭</dt>
+                <dd>현재 간선 연결 선택을 취소합니다.</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section>
+            <h2>루트와 간선</h2>
+            <dl>
+              <div>
+                <dt>Ctrl + 노드 좌클릭</dt>
+                <dd>알고리즘 시작 루트 노드를 해당 노드로 변경합니다.</dd>
+              </div>
+              <div>
+                <dt>노드 좌클릭 후 다른 노드 좌클릭</dt>
+                <dd>두 노드를 잇는 간선을 만듭니다. 처음 찍은 노드는 선택 색상으로 표시됩니다.</dd>
+              </div>
+              <div>
+                <dt>선택한 노드를 다시 좌클릭</dt>
+                <dd>간선 연결을 취소하고, 그 노드를 루트로 지정합니다.</dd>
+              </div>
+              <div>
+                <dt>노드 우클릭</dt>
+                <dd>노드를 삭제합니다. 연결된 간선도 함께 삭제되고 undo/redo에 저장됩니다.</dd>
+              </div>
+              <div>
+                <dt>간선 우클릭</dt>
+                <dd>해당 간선을 삭제합니다. 이 작업도 undo/redo에 저장됩니다.</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section>
+            <h2>가중치와 방향</h2>
+            <dl>
+              <div>
+                <dt>가중치 칸 입력 후 Enter</dt>
+                <dd>해당 방향의 가중치를 적용합니다. Enter를 누르기 전에는 내부 값이 확정되지 않습니다.</dd>
+              </div>
+              <div>
+                <dt>가중치 칸 비우고 Enter</dt>
+                <dd>해당 방향을 비활성화해서 단방향처럼 만듭니다.</dd>
+              </div>
+              <div>
+                <dt>가중치 칸에 마우스 올리기</dt>
+                <dd>그 칸이 어떤 방향의 화살표인지 빨간색 강조선으로 표시합니다.</dd>
+              </div>
+            </dl>
+          </section>
+
+          <section>
+            <h2>입력, 실행, 저장</h2>
+            <dl>
+              <div>
+                <dt>Input Graph</dt>
+                <dd><code>n m</code> 다음 줄부터 <code>a b w</code> 형식으로 입력합니다. <code>w</code>를 생략하면 1로 처리됩니다.</dd>
+              </div>
+              <div>
+                <dt>양방향 / 단방향 버튼</dt>
+                <dd>입력 그래프를 만들 때 간선을 양방향 또는 단방향으로 생성합니다.</dd>
+              </div>
+              <div>
+                <dt>bfs1, bfs2, dfs, dijkstra</dt>
+                <dd>현재 루트에서 알고리즘을 실행합니다. 결과 순서와 <code>d=</code> 값은 하단과 노드에 표시됩니다.</dd>
+              </div>
+              <div>
+                <dt>Speed 바</dt>
+                <dd>알고리즘 애니메이션 속도를 실시간으로 조절합니다.</dd>
+              </div>
+              <div>
+                <dt>오른쪽 Graph Slots</dt>
+                <dd>현재 그래프가 자동 저장됩니다. 슬롯을 누르면 그 그래프로 전환되고, 슬롯별 undo/redo 기록도 함께 복원됩니다.</dd>
+              </div>
+            </dl>
+          </section>
+        </div>
+      </section>
+    </div>
+
     <div class="history-buttons">
       <button class="history-button" type="button" aria-label="undo all" @click.stop="cancelAllUserDone">
         <font-awesome-icon :icon="['fas', 'backward-fast']" />
@@ -1966,6 +2183,27 @@ onBeforeUnmount(() => {
   background-color: #394150;
 }
 
+.help-open-button {
+  z-index: 120;
+  position: fixed;
+  right: calc(var(--saved-panel-width) + 18px);
+  bottom: 18px;
+  width: 78px;
+  height: 42px;
+  border: 1px solid rgba(134, 239, 172, 0.34);
+  border-radius: 8px;
+  background: #1f5f4b;
+  color: #dcfce7;
+  font-size: 14px;
+  font-weight: 900;
+  cursor: pointer;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.26);
+}
+
+.help-open-button:hover {
+  background: #24745a;
+}
+
 .speed-control {
   flex: 0 0 260px;
   height: 48px;
@@ -1995,6 +2233,193 @@ onBeforeUnmount(() => {
 .speed-control input {
   width: 100%;
   accent-color: #60a5fa;
+}
+
+.help-backdrop {
+  z-index: 1000;
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(3, 7, 18, 0.74);
+  padding: 20px;
+}
+
+.help-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(1100px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 12px;
+  background: #111827;
+  color: #e5e7eb;
+  box-shadow: 0 26px 80px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.help-modal-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
+  padding: 18px 22px;
+}
+
+.help-modal-header div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.help-modal-header strong {
+  font-size: 24px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.help-modal-header span {
+  color: #9ca3af;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.help-modal-header button {
+  min-width: 58px;
+  height: 34px;
+  border: 0;
+  border-radius: 7px;
+  background: rgba(239, 68, 68, 0.16);
+  color: #fecaca;
+  padding: 0 12px;
+  font-size: 13px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.help-content {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-content: start;
+  gap: 12px;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.help-section {
+  min-width: 0;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.052);
+  padding: 14px;
+}
+
+.help-section.wide {
+  grid-column: 1 / -1;
+}
+
+.help-content h2 {
+  margin: 0 0 12px;
+  color: #bfdbfe;
+  font-size: 16px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.help-list {
+  display: grid;
+  gap: 8px;
+}
+
+.help-list.compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.help-item {
+  min-width: 0;
+  border: 1px solid rgba(148, 163, 184, 0.13);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.64);
+  padding: 10px;
+}
+
+.help-item.important {
+  border-color: rgba(96, 165, 250, 0.38);
+  background: rgba(30, 64, 175, 0.18);
+}
+
+.help-action {
+  display: inline-flex;
+  max-width: 100%;
+  border-radius: 6px;
+  background: rgba(96, 165, 250, 0.16);
+  color: #dbeafe;
+  padding: 4px 7px;
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1.25;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.help-item p {
+  margin: 8px 0 0;
+  color: #cbd5e1;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.55;
+  letter-spacing: 0;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+.help-content code {
+  border-radius: 4px;
+  background: rgba(15, 23, 42, 0.82);
+  color: #bfdbfe;
+  padding: 1px 5px;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  white-space: normal;
+}
+
+@media (max-width: 980px) {
+  .help-content {
+    grid-template-columns: 1fr;
+  }
+
+  .help-list.compact {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .help-backdrop {
+    padding: 10px;
+  }
+
+  .help-modal {
+    width: calc(100vw - 20px);
+    max-height: calc(100vh - 20px);
+  }
+
+  .help-modal-header {
+    padding: 14px;
+  }
+
+  .help-modal-header strong {
+    font-size: 20px;
+  }
+
+  .help-content {
+    padding: 10px;
+  }
 }
 
 .history-buttons {
