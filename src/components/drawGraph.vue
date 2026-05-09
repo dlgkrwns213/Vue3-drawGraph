@@ -7,7 +7,6 @@ const NODE_RADIUS = 25;
 const MIN_NODE_DISTANCE = 80;
 const DRAG_START_DISTANCE = 5;
 const RELAXATION_STEPS = 8;
-const ANIMATION_DELAY = 500;
 const RESET_DELAY = 1000;
 const DISABLED_WEIGHT = null;
 
@@ -31,8 +30,22 @@ const dragState = ref(null);
 const shouldSuppressNodeClick = ref(false);
 const traversalResult = ref(null);
 const activeResultStep = ref(-1);
+const graphInput = ref('5 5\n1 2 3\n1 3 2\n2 4 4\n3 4 1\n4 5 6');
+const graphInputMode = ref('undirected');
+const animationDelay = ref(500);
 
 const hasNodes = computed(() => nodes.value.length > 0);
+const selectedNodeId = computed(() => (
+  selectedNode.value === null ? null : nodes.value[selectedNode.value]?.id
+));
+const dragNodeId = computed(() => dragState.value?.nodeId ?? null);
+const statusText = computed(() => {
+  if (isProcessing.value) return 'Running algorithm';
+  if (dragNodeId.value) return `Moving node ${dragNodeId.value}`;
+  if (selectedNodeId.value) return `Connecting from node ${selectedNodeId.value}`;
+  if (startIdx.value !== -1) return `Start node ${startIdx.value}`;
+  return 'Click canvas to add a node';
+});
 
 function getPointerPosition(event) {
   const rect = graphRoot.value.getBoundingClientRect();
@@ -41,6 +54,201 @@ function getPointerPosition(event) {
     x: event.clientX - rect.left,
     y: event.clientY - rect.top,
   };
+}
+
+function applyGraphInput() {
+  if (isProcessing.value) return;
+
+  const parsed = parseGraphInput(graphInput.value);
+  if (!parsed) return;
+
+  const { nodeCount, edges } = parsed;
+  const arrangedNodes = createAutoLayoutNodes(nodeCount);
+  const validNodeIds = new Set(arrangedNodes.map(node => node.id));
+  const nextLines = [];
+  const nextInputs = [];
+  const nextConnections = [];
+  let edgeId = 1;
+
+  for (const edge of edges) {
+    if (!validNodeIds.has(edge.from) || !validNodeIds.has(edge.to) || edge.from === edge.to) {
+      alert(`잘못된 간선입니다: ${edge.from} ${edge.to} ${edge.weight}`);
+      return;
+    }
+
+    const fromNode = arrangedNodes.find(node => node.id === edge.from);
+    const toNode = arrangedNodes.find(node => node.id === edge.to);
+    const isDirected = graphInputMode.value === 'directed';
+
+    nextLines.push({
+      id: edgeId,
+      x1: fromNode.x,
+      y1: fromNode.y,
+      x2: toNode.x,
+      y2: toNode.y,
+    });
+    nextInputs.push({
+      forward: edge.weight,
+      backward: isDirected ? '' : edge.weight,
+    });
+    nextConnections.push([
+      edge.from,
+      edge.to,
+      edge.weight,
+      isDirected ? DISABLED_WEIGHT : edge.weight,
+    ]);
+    edgeId += 1;
+  }
+
+  const before = createGraphSnapshot();
+  const after = {
+    nodes: arrangedNodes,
+    lines: nextLines,
+    inputFields: nextInputs,
+    graphConnections: nextConnections,
+    nodeOrders: Object.fromEntries(arrangedNodes.map(node => [node.id, Number.NaN])),
+    nodeSelecting: nodeCount > 0 ? [1] : [],
+    nodeSelected: [],
+    startIdx: nodeCount > 0 ? 1 : -1,
+    hoveredWeight: null,
+    traversalResult: null,
+    activeResultStep: -1,
+    nextEdgeId: edgeId,
+  };
+
+  restoreGraphSnapshot(after);
+  pushHistory({
+    type: 'replace-graph',
+    before,
+    after: createGraphSnapshot(),
+  });
+}
+
+function createGraphSnapshot() {
+  return {
+    nodes: nodes.value.map(node => ({ ...node })),
+    lines: lines.value.map(line => ({ ...line })),
+    inputFields: inputFields.value.map(input => ({ ...input })),
+    graphConnections: graphConnections.value.map(connection => [...connection]),
+    nodeOrders: { ...nodeOrders.value },
+    nodeSelecting: [...nodeSelecting.value],
+    nodeSelected: [...nodeSelected.value],
+    startIdx: startIdx.value,
+    hoveredWeight: hoveredWeight.value ? { ...hoveredWeight.value } : null,
+    traversalResult: traversalResult.value
+      ? {
+          ...traversalResult.value,
+          sequence: traversalResult.value.isGrouped
+            ? traversalResult.value.sequence.map(group => [...group])
+            : [...traversalResult.value.sequence],
+        }
+      : null,
+    activeResultStep: activeResultStep.value,
+    nextEdgeId: nextEdgeId.value,
+  };
+}
+
+function restoreGraphSnapshot(snapshot) {
+  cancelCurrentLine();
+  nodes.value = snapshot.nodes.map(node => ({ ...node }));
+  lines.value = snapshot.lines.map(line => ({ ...line }));
+  inputFields.value = snapshot.inputFields.map(input => ({ ...input }));
+  graphConnections.value = snapshot.graphConnections.map(connection => [...connection]);
+  nodeOrders.value = { ...snapshot.nodeOrders };
+  nodeSelecting.value = [...snapshot.nodeSelecting];
+  nodeSelected.value = [...snapshot.nodeSelected];
+  startIdx.value = snapshot.startIdx;
+  hoveredWeight.value = snapshot.hoveredWeight ? { ...snapshot.hoveredWeight } : null;
+  traversalResult.value = snapshot.traversalResult
+    ? {
+        ...snapshot.traversalResult,
+        sequence: snapshot.traversalResult.isGrouped
+          ? snapshot.traversalResult.sequence.map(group => [...group])
+          : [...snapshot.traversalResult.sequence],
+      }
+    : null;
+  activeResultStep.value = snapshot.activeResultStep;
+  nextEdgeId.value = snapshot.nextEdgeId;
+}
+
+function parseGraphInput(rawInput) {
+  const rows = rawInput
+    .split(/\r?\n/)
+    .map(row => row.trim())
+    .filter(Boolean);
+
+  if (rows.length === 0) {
+    alert('그래프 입력이 비어 있습니다.');
+    return null;
+  }
+
+  const header = rows[0].split(/\s+/).map(Number);
+  if (header.length < 2 || !header.every(Number.isInteger)) {
+    alert('첫 줄은 n m 형식이어야 합니다.');
+    return null;
+  }
+
+  const [nodeCount, edgeCount] = header;
+  if (nodeCount < 0 || edgeCount < 0) {
+    alert('n과 m은 0 이상이어야 합니다.');
+    return null;
+  }
+
+  if (rows.length - 1 < edgeCount) {
+    alert(`간선 ${edgeCount}개가 필요합니다.`);
+    return null;
+  }
+
+  const edges = [];
+  for (let index = 0; index < edgeCount; index += 1) {
+    const values = rows[index + 1].split(/\s+/).map(Number);
+
+    if (values.length < 2 || !Number.isInteger(values[0]) || !Number.isInteger(values[1])) {
+      alert(`${index + 2}번째 줄은 a b 또는 a b w 형식이어야 합니다.`);
+      return null;
+    }
+
+    const weight = values.length >= 3 ? values[2] : 1;
+    if (!Number.isFinite(weight)) {
+      alert(`${index + 2}번째 줄의 가중치가 올바르지 않습니다.`);
+      return null;
+    }
+
+    edges.push({
+      from: values[0],
+      to: values[1],
+      weight,
+    });
+  }
+
+  return { nodeCount, edges };
+}
+
+function createAutoLayoutNodes(nodeCount) {
+  const rect = graphRoot.value?.getBoundingClientRect();
+  const width = rect?.width || window.innerWidth || 1000;
+  const height = rect?.height || window.innerHeight || 700;
+  const panelReserve = traversalResult.value ? 130 : 100;
+  const centerX = width / 2;
+  const centerY = TOOLBAR_HEIGHT + (height - TOOLBAR_HEIGHT - panelReserve) / 2;
+  const radius = Math.max(
+    MIN_NODE_DISTANCE,
+    Math.min(width * 0.34, Math.max(120, (height - TOOLBAR_HEIGHT - panelReserve) * 0.36)),
+  );
+
+  if (nodeCount === 1) {
+    return [{ id: 1, x: centerX, y: centerY }];
+  }
+
+  return Array.from({ length: nodeCount }, (_, index) => {
+    const angle = (-Math.PI / 2) + (Math.PI * 2 * index) / nodeCount;
+
+    return {
+      id: index + 1,
+      x: clamp(centerX + Math.cos(angle) * radius, NODE_RADIUS, width - NODE_RADIUS),
+      y: clamp(centerY + Math.sin(angle) * radius, TOOLBAR_HEIGHT + NODE_RADIUS, height - NODE_RADIUS),
+    };
+  });
 }
 
 function handleClick(event) {
@@ -727,6 +935,11 @@ function revertAction(action) {
     return;
   }
 
+  if (action.type === 'replace-graph') {
+    restoreGraphSnapshot(action.before);
+    return;
+  }
+
   lines.value.pop();
   inputFields.value.pop();
   graphConnections.value.pop();
@@ -757,6 +970,11 @@ function applyAction(action) {
 
   if (action.type === 'delete-edge') {
     applyDeleteEdgeAction(action);
+    return;
+  }
+
+  if (action.type === 'replace-graph') {
+    restoreGraphSnapshot(action.after);
     return;
   }
 
@@ -828,6 +1046,19 @@ function delay(ms) {
   });
 }
 
+async function waitAnimationDelay() {
+  const startedAt = window.performance.now();
+
+  while (window.performance.now() - startedAt < getAnimationDelay()) {
+    await delay(25);
+  }
+}
+
+function getAnimationDelay() {
+  const delayValue = Number(animationDelay.value);
+  return Number.isFinite(delayValue) ? delayValue : 0;
+}
+
 async function colorNodes(sequence, isGrouped = false) {
   if (isGrouped) {
     for (let idx = 0; idx < sequence.length; idx += 1) {
@@ -839,7 +1070,7 @@ async function colorNodes(sequence, isGrouped = false) {
         markNode(node, idx + 1);
       }
 
-      await delay(ANIMATION_DELAY);
+      await waitAnimationDelay();
     }
   } else {
     for (let idx = 0; idx < sequence.length; idx += 1) {
@@ -847,7 +1078,7 @@ async function colorNodes(sequence, isGrouped = false) {
       activeResultStep.value = idx;
       nodeSelecting.value = [node];
       markNode(node, idx + 1);
-      await delay(ANIMATION_DELAY);
+      await waitAnimationDelay();
     }
   }
 
@@ -907,6 +1138,18 @@ onBeforeUnmount(() => {
       <button class="button" type="button" @click="clickBFSButton(true)">bfs2</button>
       <button class="button" type="button" @click="clickDFSButton">dfs</button>
       <button class="button" type="button" @click="clickDijkstraButton">dijkstra</button>
+      <label class="speed-control">
+        <span>Speed</span>
+        <input
+          v-model.number="animationDelay"
+          type="range"
+          min="0"
+          max="1500"
+          step="20"
+          aria-label="animation delay"
+        />
+        <output>{{ animationDelay }}ms</output>
+      </label>
     </div>
 
     <div class="history-buttons">
@@ -923,6 +1166,41 @@ onBeforeUnmount(() => {
         <font-awesome-icon :icon="['fas', 'forward-fast']" />
       </button>
     </div>
+
+    <div class="status-strip">
+      <span class="status-dot"></span>
+      <span>{{ statusText }}</span>
+    </div>
+
+    <section class="graph-input-panel" aria-label="graph text input">
+      <div class="graph-input-header">
+        <strong>Input Graph</strong>
+        <div class="direction-toggle" aria-label="edge direction mode">
+          <button
+            type="button"
+            :class="{ active: graphInputMode === 'undirected' }"
+            @click="graphInputMode = 'undirected'"
+          >
+            양방향
+          </button>
+          <button
+            type="button"
+            :class="{ active: graphInputMode === 'directed' }"
+            @click="graphInputMode = 'directed'"
+          >
+            단방향
+          </button>
+        </div>
+      </div>
+      <textarea
+        v-model="graphInput"
+        spellcheck="false"
+        aria-label="graph input as n m then edges"
+      ></textarea>
+      <button class="graph-input-apply" type="button" @click="applyGraphInput">
+        Draw
+      </button>
+    </section>
 
     <svg class="graph-canvas" @click="handleClick">
       <defs>
@@ -1106,6 +1384,8 @@ onBeforeUnmount(() => {
         'node-selecting': nodeSelecting.includes(node.id),
         'node-selected': nodeSelected.includes(node.id),
         'node-pending': selectedNode === index,
+        'node-dragging': dragNodeId === node.id,
+        'node-start': startIdx === node.id && !nodeSelecting.includes(node.id),
       }"
       :style="{
         left: `${node.x}px`,
@@ -1176,12 +1456,14 @@ onBeforeUnmount(() => {
 .graph-toolbar {
   width: 100%;
   height: 100px;
-  background: #333;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  background: #24272d;
   color: white;
   display: flex;
   align-items: center;
-  gap: 20px;
+  gap: 10px;
   padding: 0 20px;
+  overflow-x: auto;
 }
 
 .graph-toolbar h1 {
@@ -1201,19 +1483,52 @@ onBeforeUnmount(() => {
 }
 
 .button {
-  width: 150px;
-  height: 80%;
-  border: 1px solid #555;
+  width: 128px;
+  height: 48px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
-  background-color: rgb(41, 41, 41);
-  color: rgb(215, 215, 215);
-  font-size: 20px;
+  background-color: #30343b;
+  color: #e5e7eb;
+  font-size: 16px;
+  font-weight: 700;
   cursor: pointer;
 }
 
 .button:hover,
 .history-button:hover {
-  background-color: rgb(64, 64, 64);
+  border-color: rgba(96, 165, 250, 0.55);
+  background-color: #394150;
+}
+
+.speed-control {
+  flex: 0 0 260px;
+  height: 48px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.055);
+  color: #d1d5db;
+  padding: 0 12px;
+}
+
+.speed-control span,
+.speed-control output {
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.speed-control output {
+  min-width: 54px;
+  color: #93c5fd;
+  text-align: right;
+}
+
+.speed-control input {
+  width: 100%;
+  accent-color: #60a5fa;
 }
 
 .history-buttons {
@@ -1230,13 +1545,125 @@ onBeforeUnmount(() => {
   height: 30px;
   border: 0;
   border-radius: 6px;
-  background-color: transparent;
+  background-color: rgba(255, 255, 255, 0.06);
   color: white;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 25px;
+}
+
+.status-strip {
+  z-index: 90;
+  position: absolute;
+  top: 110px;
+  left: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  background: rgba(20, 22, 26, 0.84);
+  color: #d1d5db;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #60a5fa;
+  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.16);
+}
+
+.graph-input-panel {
+  z-index: 90;
+  position: absolute;
+  top: 150px;
+  left: 20px;
+  width: 260px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 8px;
+  background: rgba(20, 22, 26, 0.9);
+  color: white;
+  padding: 10px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+
+.graph-input-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.graph-input-header strong {
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.direction-toggle {
+  display: inline-flex;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.direction-toggle button {
+  height: 26px;
+  border: 0;
+  background: rgba(255, 255, 255, 0.06);
+  color: #cbd5e1;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.direction-toggle button.active {
+  background: #60a5fa;
+  color: #07111f;
+}
+
+.graph-input-panel textarea {
+  width: 100%;
+  height: 112px;
+  resize: vertical;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  background: rgba(3, 7, 18, 0.58);
+  color: #e5e7eb;
+  padding: 8px;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  outline: 0;
+}
+
+.graph-input-panel textarea:focus {
+  border-color: rgba(96, 165, 250, 0.75);
+}
+
+.graph-input-apply {
+  width: 100%;
+  height: 32px;
+  margin-top: 8px;
+  border: 0;
+  border-radius: 7px;
+  background: #2563eb;
+  color: white;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.graph-input-apply:hover {
+  background: #1d4ed8;
 }
 
 .graph-canvas {
@@ -1313,27 +1740,48 @@ onBeforeUnmount(() => {
 
 .node {
   background: white;
-  border: 2px solid black;
+  border: 2px solid #111827;
   border-radius: 50%;
   position: absolute;
   transform: translate(-50%, -50%);
   cursor: pointer;
   display: flex;
   z-index: 2;
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.24);
+  transition:
+    background-color 0.12s ease,
+    border-color 0.12s ease,
+    box-shadow 0.12s ease,
+    transform 0.12s ease;
 }
 
 .node-selected {
-  background-color: rgb(88, 88, 88);
+  background-color: #a7f3d0;
+  border-color: #059669;
+  box-shadow: 0 0 0 5px rgba(16, 185, 129, 0.24);
 }
 
 .node-selecting {
-  background-color: yellow;
+  background-color: #fef08a;
+  border-color: #ca8a04;
+  box-shadow: 0 0 0 6px rgba(234, 179, 8, 0.28);
 }
 
 .node-pending {
   background-color: #7dd3fc;
   border-color: #0ea5e9;
   box-shadow: 0 0 0 5px rgba(14, 165, 233, 0.28);
+}
+
+.node-dragging {
+  border-color: #f97316;
+  box-shadow:
+    0 0 0 6px rgba(249, 115, 22, 0.26),
+    0 12px 24px rgba(0, 0, 0, 0.34);
+}
+
+.node-start {
+  border-color: #60a5fa;
 }
 
 .edge-line {
@@ -1385,7 +1833,7 @@ onBeforeUnmount(() => {
   z-index: 1;
   font-size: 30px;
   font-weight: bold;
-  color: black;
+  color: #111827;
   padding: 2px;
   user-select: none;
 }
@@ -1407,9 +1855,9 @@ onBeforeUnmount(() => {
   bottom: 20px;
   z-index: 80;
   min-height: 78px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 8px;
-  background: rgba(22, 22, 22, 0.9);
+  background: rgba(20, 23, 29, 0.92);
   color: white;
   padding: 12px 14px;
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32);
@@ -1423,6 +1871,7 @@ onBeforeUnmount(() => {
 }
 
 .traversal-header strong {
+  color: #f8fafc;
   font-size: 14px;
   font-weight: 800;
 }
@@ -1448,9 +1897,9 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 6px;
   min-height: 34px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.055);
   padding: 5px 7px;
 }
 
@@ -1480,7 +1929,7 @@ onBeforeUnmount(() => {
   min-width: 28px;
   height: 24px;
   border-radius: 999px;
-  background: #f8fafc;
+  background: #e5e7eb;
   color: #111827;
   display: inline-flex;
   align-items: center;
@@ -1491,12 +1940,17 @@ onBeforeUnmount(() => {
 }
 
 .traversal-active {
-  border-color: rgba(250, 204, 21, 0.85);
-  background: rgba(113, 63, 18, 0.82);
+  border-color: rgba(96, 165, 250, 0.95);
+  background: rgba(30, 64, 175, 0.58);
+  box-shadow: inset 0 0 0 1px rgba(147, 197, 253, 0.28);
 }
 
 .traversal-active .traversal-step-label {
-  background: #facc15;
-  color: #111827;
+  background: #60a5fa;
+  color: #07111f;
+}
+
+.traversal-active .traversal-node {
+  background: #bfdbfe;
 }
 </style>
