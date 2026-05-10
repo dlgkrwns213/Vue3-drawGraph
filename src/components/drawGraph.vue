@@ -56,7 +56,9 @@ const activeGraphId = ref(null);
 const isRestoringSavedGraph = ref(false);
 const isHelpOpen = ref(false);
 const isGraphInputCollapsed = ref(false);
+const warningMessage = ref('');
 let autoSaveTimer = null;
+let warningTimer = null;
 
 const hasNodes = computed(() => nodes.value.length > 0);
 const selectedNodeId = computed(() => (
@@ -114,7 +116,7 @@ function applyGraphInput() {
 
   for (const edge of edges) {
     if (!validNodeIds.has(edge.from) || !validNodeIds.has(edge.to) || edge.from === edge.to) {
-      alert(`잘못된 간선입니다: ${edge.from} ${edge.to} ${edge.weight}`);
+      showWarning(`잘못된 간선입니다: ${edge.from} ${edge.to} ${edge.weight}`);
       return;
     }
 
@@ -159,6 +161,48 @@ function applyGraphInput() {
   };
 
   replaceGraphWithSnapshot(after);
+}
+
+function exportGraphToInput() {
+  if (isProcessing.value) return;
+
+  const nodeCount = nodes.value.length === 0 ? 0 : Math.max(...nodes.value.map(node => node.id));
+  const canUseUndirectedInput = graphConnections.value.every(([, , forwardWeight, backwardWeight]) => (
+    forwardWeight !== DISABLED_WEIGHT
+    && backwardWeight !== DISABLED_WEIGHT
+    && forwardWeight === backwardWeight
+  ));
+  const edgeRows = [];
+
+  graphInputMode.value = canUseUndirectedInput ? 'undirected' : 'directed';
+
+  for (const [from, to, forwardWeight, backwardWeight] of graphConnections.value) {
+    if (canUseUndirectedInput) {
+      edgeRows.push({ from, to, weight: forwardWeight });
+      continue;
+    }
+
+    if (forwardWeight !== DISABLED_WEIGHT) {
+      edgeRows.push({ from, to, weight: forwardWeight });
+    }
+
+    if (backwardWeight !== DISABLED_WEIGHT) {
+      edgeRows.push({ from: to, to: from, weight: backwardWeight });
+    }
+  }
+
+  const shouldOmitWeights = edgeRows.every(edge => Number(edge.weight) === 1);
+  const rows = [
+    `${nodeCount} ${edgeRows.length}`,
+    ...edgeRows.map(edge => (
+      shouldOmitWeights
+        ? `${edge.from} ${edge.to}`
+        : `${edge.from} ${edge.to} ${edge.weight}`
+    )),
+  ];
+
+  graphInput.value = rows.join('\n');
+  isGraphInputCollapsed.value = false;
 }
 
 function createGraphSnapshot() {
@@ -541,6 +585,14 @@ function persistSavedGraphs() {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(savedGraphs.value));
 }
 
+function showWarning(message) {
+  warningMessage.value = message;
+  window.clearTimeout(warningTimer);
+  warningTimer = window.setTimeout(() => {
+    warningMessage.value = '';
+  }, 2200);
+}
+
 function parseGraphInput(rawInput) {
   const rows = rawInput
     .split(/\r?\n/)
@@ -548,35 +600,40 @@ function parseGraphInput(rawInput) {
     .filter(Boolean);
 
   if (rows.length === 0) {
-    alert('그래프 입력이 비어 있습니다.');
+    showWarning('그래프 입력이 비어 있습니다.');
     return null;
   }
 
   const header = rows[0].split(/\s+/).map(Number);
   if (header.length < 2 || !header.every(Number.isInteger)) {
-    alert('첫 줄은 n m 형식이어야 합니다.');
+    showWarning('첫 줄은 n m 형식이어야 합니다.');
     return null;
   }
 
   const [nodeCount, edgeCount] = header;
   if (nodeCount < 0 || edgeCount < 0) {
-    alert('n과 m은 0 이상이어야 합니다.');
+    showWarning('n과 m은 0 이상이어야 합니다.');
     return null;
   }
 
   if (nodeCount > MAX_INPUT_NODE_COUNT) {
-    alert(`n은 최대 ${MAX_INPUT_NODE_COUNT}개까지 입력할 수 있습니다.`);
+    showWarning(`n은 최대 ${MAX_INPUT_NODE_COUNT}개까지 입력할 수 있습니다.`);
     return null;
   }
 
   const maxEdgeCount = getMaxGraphInputEdgeCount(nodeCount);
   if (edgeCount > maxEdgeCount) {
-    alert(`현재 모드에서 n=${nodeCount}일 때 m은 최대 ${maxEdgeCount}개까지 가능합니다.`);
+    showWarning(`현재 모드에서 n=${nodeCount}일 때 m은 최대 ${maxEdgeCount}개까지 가능합니다.`);
     return null;
   }
 
   if (rows.length - 1 < edgeCount) {
-    alert(`간선 ${edgeCount}개가 필요합니다.`);
+    showWarning(`간선 ${edgeCount}개가 필요합니다.`);
+    return null;
+  }
+
+  if (rows.length - 1 > edgeCount) {
+    showWarning(`m=${edgeCount}보다 많은 간선이 입력되었습니다.`);
     return null;
   }
 
@@ -585,13 +642,13 @@ function parseGraphInput(rawInput) {
     const values = rows[index + 1].split(/\s+/).map(Number);
 
     if (values.length < 2 || !Number.isInteger(values[0]) || !Number.isInteger(values[1])) {
-      alert(`${index + 2}번째 줄은 a b 또는 a b w 형식이어야 합니다.`);
+      showWarning(`${index + 2}번째 줄은 a b 또는 a b w 형식이어야 합니다.`);
       return null;
     }
 
     const weight = values.length >= 3 ? values[2] : 1;
     if (!Number.isFinite(weight)) {
-      alert(`${index + 2}번째 줄의 가중치가 올바르지 않습니다.`);
+      showWarning(`${index + 2}번째 줄의 가중치가 올바르지 않습니다.`);
       return null;
     }
 
@@ -1415,7 +1472,7 @@ function cancelUserDone() {
   if (isProcessing.value) return;
 
   if (!undoLastAction()) {
-    alert('처음 상태입니다.');
+    showWarning('처음 상태입니다.');
   }
 }
 
@@ -1436,7 +1493,7 @@ function redoUserDone() {
   if (isProcessing.value) return;
 
   if (!redoLastAction()) {
-    alert('다시 실행할 작업이 없습니다.');
+    showWarning('다시 실행할 작업이 없습니다.');
   }
 }
 
@@ -1572,7 +1629,7 @@ async function clickDFSButton() {
 async function clickDijkstraButton() {
   if (!canRunAlgorithm()) return;
   if (hasNegativeWeight()) {
-    alert('Dijkstra는 음수 가중치에서 사용할 수 없습니다. Bellman-Ford를 사용하세요.');
+    showWarning('Dijkstra는 음수 가중치에서 사용할 수 없습니다. Bellman-Ford를 사용하세요.');
     return;
   }
 
@@ -2015,6 +2072,7 @@ window.addEventListener('keydown', handleKeyboardShortcut);
 
 onBeforeUnmount(() => {
   window.clearTimeout(autoSaveTimer);
+  window.clearTimeout(warningTimer);
   window.removeEventListener('mousemove', drawLine);
   window.removeEventListener('mousemove', dragNode);
   window.removeEventListener('mouseup', stopNodeDrag);
@@ -2334,6 +2392,10 @@ onBeforeUnmount(() => {
       <span>{{ statusText }}</span>
     </div>
 
+    <div v-if="warningMessage" class="warning-toast" role="status">
+      {{ warningMessage }}
+    </div>
+
     <section
       class="graph-input-panel"
       :class="{ collapsed: isGraphInputCollapsed }"
@@ -2375,9 +2437,14 @@ onBeforeUnmount(() => {
           spellcheck="false"
           aria-label="graph input as n m then edges"
         ></textarea>
-        <button class="graph-input-apply" type="button" @click="applyGraphInput">
-          Draw
-        </button>
+        <div class="graph-input-actions">
+          <button class="graph-input-apply" type="button" @click="applyGraphInput">
+            Draw
+          </button>
+          <button class="graph-input-export" type="button" @click="exportGraphToInput">
+            To Input
+          </button>
+        </div>
       </template>
     </section>
 
@@ -3162,12 +3229,31 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.16);
 }
 
+.warning-toast {
+  z-index: 1000;
+  position: fixed;
+  left: 50%;
+  top: 118px;
+  max-width: min(460px, calc(100vw - 32px));
+  transform: translateX(-50%);
+  border: 1px solid rgba(248, 113, 113, 0.42);
+  border-radius: 8px;
+  background: rgba(127, 29, 29, 0.94);
+  color: #fff;
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.28);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.35;
+  padding: 10px 14px;
+  pointer-events: none;
+}
+
 .graph-input-panel {
   z-index: 90;
   position: absolute;
   top: 150px;
   left: 20px;
-  width: 260px;
+  width: 244px;
   border: 1px solid rgba(148, 163, 184, 0.2);
   border-radius: 8px;
   background: rgba(20, 22, 26, 0.9);
@@ -3177,35 +3263,39 @@ onBeforeUnmount(() => {
 }
 
 .graph-input-panel.collapsed {
-  width: 168px;
-  padding: 8px 10px;
+  width: fit-content;
+  padding: 8px 9px;
 }
 
 .graph-input-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 46px 82px;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
   margin-bottom: 8px;
 }
 
 .graph-input-panel.collapsed .graph-input-header {
+  grid-template-columns: auto 46px;
   margin-bottom: 0;
 }
 
 .graph-input-header strong {
+  min-width: 0;
   font-size: 13px;
   font-weight: 800;
+  white-space: nowrap;
 }
 
 .graph-input-toggle {
-  height: 26px;
+  width: 46px;
+  height: 24px;
   border: 0;
   border-radius: 7px;
   background: #374151;
   color: #e5e7eb;
-  padding: 0 9px;
-  font-size: 11px;
+  padding: 0 6px;
+  font-size: 10px;
   font-weight: 900;
   cursor: pointer;
 }
@@ -3216,18 +3306,21 @@ onBeforeUnmount(() => {
 
 .direction-toggle {
   display: inline-flex;
+  justify-self: end;
+  width: 82px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 7px;
   overflow: hidden;
 }
 
 .direction-toggle button {
-  height: 26px;
+  flex: 1 1 0;
+  height: 24px;
   border: 0;
   background: rgba(255, 255, 255, 0.06);
   color: #cbd5e1;
-  padding: 0 8px;
-  font-size: 11px;
+  padding: 0 5px;
+  font-size: 10px;
   font-weight: 800;
   cursor: pointer;
 }
@@ -3256,21 +3349,39 @@ onBeforeUnmount(() => {
   border-color: rgba(96, 165, 250, 0.75);
 }
 
-.graph-input-apply {
-  width: 100%;
-  height: 32px;
+.graph-input-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
   margin-top: 8px;
+}
+
+.graph-input-apply,
+.graph-input-export {
+  height: 32px;
   border: 0;
   border-radius: 7px;
-  background: #2563eb;
-  color: white;
   font-size: 13px;
   font-weight: 800;
   cursor: pointer;
 }
 
+.graph-input-apply {
+  background: #2563eb;
+  color: white;
+}
+
 .graph-input-apply:hover {
   background: #1d4ed8;
+}
+
+.graph-input-export {
+  background: #334155;
+  color: #e5e7eb;
+}
+
+.graph-input-export:hover {
+  background: #475569;
 }
 
 .saved-graphs-panel {
