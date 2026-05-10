@@ -170,9 +170,15 @@ function dijkstra(nodes, lineGraph, startIdx = 1) {
   const heap = new MinHeap();
   const distances = Array(graph.length).fill(Infinity);
   const nodeOrder = [];
+  const steps = [];
 
   heap.push([0, startIdx]);
   distances[startIdx] = 0;
+  steps.push({
+    type: 'init',
+    node: startIdx,
+    distances: Object.fromEntries(nodeIds.map(nodeId => [nodeId, distances[nodeId]])),
+  });
 
   while (!heap.isEmpty()) {
     const [dist, nowIdx] = heap.pop();
@@ -182,6 +188,11 @@ function dijkstra(nodes, lineGraph, startIdx = 1) {
     }
 
     nodeOrder.push(nowIdx);
+    steps.push({
+      type: 'visit',
+      node: nowIdx,
+      distances: Object.fromEntries(nodeIds.map(nodeId => [nodeId, distances[nodeId]])),
+    });
 
     for (const [nextIdx, weight] of graph[nowIdx]) {
       if (weight < 0) {
@@ -192,12 +203,19 @@ function dijkstra(nodes, lineGraph, startIdx = 1) {
       if (distances[nextIdx] > nextDist) {
         distances[nextIdx] = nextDist;
         heap.push([nextDist, nextIdx]);
+        steps.push({
+          type: 'relax',
+          node: nextIdx,
+          from: nowIdx,
+          distances: Object.fromEntries(nodeIds.map(nodeId => [nodeId, distances[nodeId]])),
+        });
       }
     }
   }
 
   return {
     order: nodeOrder,
+    steps,
     distances: Object.fromEntries(nodeIds.map(nodeId => [
       nodeId,
       distances[nodeId],

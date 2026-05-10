@@ -33,12 +33,18 @@ const startIdx = ref(-1);
 const nodeSelecting = ref([]);
 const nodeSelected = ref([]);
 const isProcessing = ref(false);
+const isSimulationPaused = ref(false);
+const shouldStopSimulation = ref(false);
 const nodeOrders = ref({});
 const nodeDistances = ref({});
 const hoveredWeight = ref(null);
 const nextEdgeId = ref(1);
 const dragState = ref(null);
+const panState = ref(null);
+const selectionState = ref(null);
+const selectedGroupNodeIds = ref([]);
 const shouldSuppressNodeClick = ref(false);
+const activeMstEdges = ref([]);
 const traversalResult = ref(null);
 const activeResultStep = ref(-1);
 const graphInput = ref('5 5\n1 2 3\n1 3 2\n2 4 4\n3 4 1\n4 5 6');
@@ -57,8 +63,26 @@ const selectedNodeId = computed(() => (
   selectedNode.value === null ? null : nodes.value[selectedNode.value]?.id
 ));
 const dragNodeId = computed(() => dragState.value?.nodeId ?? null);
+const isPanningGraph = computed(() => panState.value?.didMove ?? false);
+const selectionRect = computed(() => {
+  const state = selectionState.value;
+  if (!state) return null;
+
+  const x = Math.min(state.startX, state.currentX);
+  const y = Math.min(state.startY, state.currentY);
+
+  return {
+    x,
+    y,
+    width: Math.abs(state.currentX - state.startX),
+    height: Math.abs(state.currentY - state.startY),
+  };
+});
 const statusText = computed(() => {
+  if (isProcessing.value && isSimulationPaused.value) return 'Simulation paused';
   if (isProcessing.value) return 'Running algorithm';
+  if (selectionState.value) return 'Selecting nodes';
+  if (isPanningGraph.value) return 'Moving selected nodes';
   if (dragNodeId.value) return `Moving node ${dragNodeId.value}`;
   if (selectedNodeId.value) return `Connecting from node ${selectedNodeId.value}`;
   if (startIdx.value !== -1) return `Start node ${startIdx.value}`;
@@ -149,11 +173,13 @@ function createGraphSnapshot() {
     nodeSelected: [...nodeSelected.value],
     startIdx: startIdx.value,
     hoveredWeight: hoveredWeight.value ? { ...hoveredWeight.value } : null,
+    activeMstEdges: activeMstEdges.value.map(edge => ({ ...edge })),
     traversalResult: traversalResult.value
       ? {
           ...traversalResult.value,
           distances: traversalResult.value.distances ? { ...traversalResult.value.distances } : null,
           details: traversalResult.value.details ? [...traversalResult.value.details] : null,
+          mstEdges: traversalResult.value.mstEdges ? traversalResult.value.mstEdges.map(edge => ({ ...edge })) : null,
           matrix: traversalResult.value.matrix ? cloneValue(traversalResult.value.matrix) : null,
           sequence: traversalResult.value.isGrouped
             ? traversalResult.value.sequence.map(group => [...group])
@@ -178,11 +204,13 @@ function restoreGraphSnapshot(snapshot) {
   nodeSelected.value = [...normalizedSnapshot.nodeSelected];
   startIdx.value = normalizedSnapshot.startIdx;
   hoveredWeight.value = normalizedSnapshot.hoveredWeight ? { ...normalizedSnapshot.hoveredWeight } : null;
+  activeMstEdges.value = normalizedSnapshot.activeMstEdges.map(edge => ({ ...edge }));
   traversalResult.value = normalizedSnapshot.traversalResult
     ? {
         ...normalizedSnapshot.traversalResult,
         distances: normalizedSnapshot.traversalResult.distances ? { ...normalizedSnapshot.traversalResult.distances } : null,
         details: normalizedSnapshot.traversalResult.details ? [...normalizedSnapshot.traversalResult.details] : null,
+        mstEdges: normalizedSnapshot.traversalResult.mstEdges ? normalizedSnapshot.traversalResult.mstEdges.map(edge => ({ ...edge })) : null,
         matrix: normalizedSnapshot.traversalResult.matrix ? cloneValue(normalizedSnapshot.traversalResult.matrix) : null,
         sequence: normalizedSnapshot.traversalResult.isGrouped
           ? normalizedSnapshot.traversalResult.sequence.map(group => [...group])
@@ -378,6 +406,7 @@ function createEmptyGraphSnapshot() {
     nodeSelected: [],
     startIdx: -1,
     hoveredWeight: null,
+    activeMstEdges: [],
     traversalResult: null,
     activeResultStep: -1,
     nextEdgeId: 1,
@@ -401,11 +430,13 @@ function normalizeGraphSnapshot(snapshot = {}) {
     nodeSelected: [...(snapshot.nodeSelected ?? empty.nodeSelected)],
     startIdx: snapshot.startIdx ?? empty.startIdx,
     hoveredWeight: snapshot.hoveredWeight ? { ...snapshot.hoveredWeight } : null,
+    activeMstEdges: (snapshot.activeMstEdges ?? empty.activeMstEdges).map(edge => ({ ...edge })),
     traversalResult: traversal
       ? {
           ...traversal,
           distances: traversal.distances ? { ...traversal.distances } : null,
           details: traversal.details ? [...traversal.details] : null,
+          mstEdges: traversal.mstEdges ? traversal.mstEdges.map(edge => ({ ...edge })) : null,
           matrix: traversal.matrix ? cloneValue(traversal.matrix) : null,
           sequence: traversal.isGrouped
             ? (traversal.sequence ?? []).map(group => [...group])
@@ -610,7 +641,10 @@ function createAutoLayoutNodes(nodeCount) {
 }
 
 function handleClick(event) {
-  if (isProcessing.value || selectedNode.value !== null) return;
+  if (isProcessing.value || selectedNode.value !== null || shouldSuppressNodeClick.value) {
+    shouldSuppressNodeClick.value = false;
+    return;
+  }
 
   const { x, y } = getPointerPosition(event);
 
@@ -620,6 +654,12 @@ function handleClick(event) {
   if (startIdx.value === -1) {
     setStartNode(nodes.value[nodes.value.length - 1].id);
   }
+}
+
+function handleCanvasMouseDown(event) {
+  if (!event.ctrlKey) return;
+
+  startNodeSelection(event);
 }
 
 function addNode(x, y) {
@@ -675,6 +715,15 @@ function connectNode(index, event) {
 function startNodeDrag(index, event) {
   if (isProcessing.value || selectedNode.value !== null || event.button !== 0) return;
 
+  if (event.ctrlKey) {
+    if (selectedGroupNodeIds.value.includes(nodes.value[index]?.id)) {
+      startGroupPan(event);
+    } else {
+      startNodeSelection(event);
+    }
+    return;
+  }
+
   const node = nodes.value[index];
   if (!node) return;
 
@@ -690,6 +739,136 @@ function startNodeDrag(index, event) {
 
   window.addEventListener('mousemove', dragNode);
   window.addEventListener('mouseup', stopNodeDrag);
+}
+
+function startNodeSelection(event) {
+  if (isProcessing.value || selectedNode.value !== null || event.button !== 0) return;
+
+  event.preventDefault();
+  shouldSuppressNodeClick.value = true;
+
+  const { x, y } = getPointerPosition(event);
+  selectionState.value = {
+    startMouseX: event.clientX,
+    startMouseY: event.clientY,
+    startX: x,
+    startY: y,
+    currentX: x,
+    currentY: y,
+    didMove: false,
+  };
+
+  cancelCurrentLine();
+  window.addEventListener('mousemove', updateNodeSelection);
+  window.addEventListener('mouseup', finishNodeSelection);
+}
+
+function updateNodeSelection(event) {
+  const state = selectionState.value;
+  if (!state) return;
+
+  const { x, y } = getPointerPosition(event);
+  const totalDistance = Math.hypot(event.clientX - state.startMouseX, event.clientY - state.startMouseY);
+  state.currentX = x;
+  state.currentY = y;
+
+  if (totalDistance >= DRAG_START_DISTANCE) {
+    state.didMove = true;
+    shouldSuppressNodeClick.value = true;
+  }
+}
+
+function finishNodeSelection() {
+  const state = selectionState.value;
+
+  if (state?.didMove && selectionRect.value) {
+    const rect = selectionRect.value;
+    selectedGroupNodeIds.value = nodes.value
+      .filter(node => (
+        node.x >= rect.x
+        && node.x <= rect.x + rect.width
+        && node.y >= rect.y
+        && node.y <= rect.y + rect.height
+      ))
+      .map(node => node.id);
+    shouldSuppressNodeClick.value = true;
+  }
+
+  selectionState.value = null;
+  window.removeEventListener('mousemove', updateNodeSelection);
+  window.removeEventListener('mouseup', finishNodeSelection);
+}
+
+function startGroupPan(event) {
+  if (isProcessing.value || selectedNode.value !== null || event.button !== 0 || nodes.value.length === 0) return;
+  if (selectedGroupNodeIds.value.length === 0) return;
+
+  event.preventDefault();
+
+  panState.value = {
+    startMouseX: event.clientX,
+    startMouseY: event.clientY,
+    previousMouseX: event.clientX,
+    previousMouseY: event.clientY,
+    didMove: false,
+  };
+
+  cancelCurrentLine();
+  window.addEventListener('mousemove', panGraph);
+  window.addEventListener('mouseup', stopGraphPan);
+}
+
+function panGraph(event) {
+  const state = panState.value;
+  if (!state) return;
+
+  const totalDistance = Math.hypot(event.clientX - state.startMouseX, event.clientY - state.startMouseY);
+  if (!state.didMove && totalDistance < DRAG_START_DISTANCE) return;
+
+  const deltaX = event.clientX - state.previousMouseX;
+  const deltaY = event.clientY - state.previousMouseY;
+
+  state.didMove = true;
+  shouldSuppressNodeClick.value = true;
+  state.previousMouseX = event.clientX;
+  state.previousMouseY = event.clientY;
+
+  moveSelectedNodes(deltaX, deltaY);
+  updateAllLines();
+}
+
+function stopGraphPan() {
+  if (panState.value?.didMove) {
+    shouldSuppressNodeClick.value = true;
+  }
+
+  panState.value = null;
+  window.removeEventListener('mousemove', panGraph);
+  window.removeEventListener('mouseup', stopGraphPan);
+}
+
+function moveSelectedNodes(deltaX, deltaY) {
+  const rect = graphRoot.value.getBoundingClientRect();
+  const selectedNodes = nodes.value.filter(node => selectedGroupNodeIds.value.includes(node.id));
+  if (selectedNodes.length === 0) return;
+
+  const bounds = getNodeBounds(selectedNodes);
+  const clampedDeltaX = clamp(deltaX, NODE_RADIUS - bounds.minX, rect.width - NODE_RADIUS - bounds.maxX);
+  const clampedDeltaY = clamp(deltaY, TOOLBAR_HEIGHT + NODE_RADIUS - bounds.minY, rect.height - NODE_RADIUS - bounds.maxY);
+
+  for (const node of selectedNodes) {
+    node.x += clampedDeltaX;
+    node.y += clampedDeltaY;
+  }
+}
+
+function getNodeBounds(targetNodes = nodes.value) {
+  return {
+    minX: Math.min(...targetNodes.map(node => node.x)),
+    maxX: Math.max(...targetNodes.map(node => node.x)),
+    minY: Math.min(...targetNodes.map(node => node.y)),
+    maxY: Math.max(...targetNodes.map(node => node.y)),
+  };
 }
 
 function dragNode(event) {
@@ -992,6 +1171,11 @@ function deleteNode(index) {
 
 function deleteEdge(index) {
   if (isProcessing.value) return;
+
+  if (selectedNode.value !== null || currentLine.value !== null) {
+    cancelCurrentLine();
+    return;
+  }
 
   const line = lines.value[index];
   if (!line) return;
@@ -1369,9 +1553,8 @@ async function clickBFSButton(groupByLevel) {
   await runAlgorithm(async () => {
     const { levels, orderIdx } = bfs(nodes.value, graphConnections.value, startIdx.value);
     const metrics = buildBfsLevelMetrics(levels);
-    nodeDistances.value = metrics;
     setTraversalResult(groupByLevel ? 'BFS Level' : 'BFS', groupByLevel ? levels : orderIdx, groupByLevel, metrics);
-    await colorNodes(groupByLevel ? levels : orderIdx, groupByLevel);
+    await colorNodes(groupByLevel ? levels : orderIdx, groupByLevel, metrics);
   });
 }
 
@@ -1381,9 +1564,8 @@ async function clickDFSButton() {
   await runAlgorithm(async () => {
     const order = dfs(nodes.value, graphConnections.value, startIdx.value);
     const metrics = buildOrderMetrics(order);
-    nodeDistances.value = metrics;
     setTraversalResult('DFS', order, false, metrics);
-    await colorNodes(order);
+    await colorNodes(order, false, metrics);
   });
 }
 
@@ -1395,10 +1577,10 @@ async function clickDijkstraButton() {
   }
 
   await runAlgorithm(async () => {
-    const { order, distances } = dijkstra(nodes.value, graphConnections.value, startIdx.value);
-    nodeDistances.value = normalizeDistances(distances);
-    setTraversalResult('Dijkstra', order, false, nodeDistances.value);
-    await colorNodes(order);
+    const { order, distances, steps } = dijkstra(nodes.value, graphConnections.value, startIdx.value);
+    const metrics = normalizeDistances(distances);
+    setTraversalResult('Dijkstra', order, false, metrics);
+    await animateDijkstraSteps(steps);
   });
 }
 
@@ -1407,15 +1589,15 @@ async function clickBellmanFordButton() {
 
   await runAlgorithm(async () => {
     const { order, distances, hasNegativeCycle } = bellmanFord(nodes.value, graphConnections.value, startIdx.value);
-    nodeDistances.value = normalizeDistances(distances);
+    const metrics = normalizeDistances(distances);
     setTraversalResult(
       'Bellman-Ford',
       order,
       false,
-      nodeDistances.value,
+      metrics,
       hasNegativeCycle ? ['음수 사이클이 감지되었습니다. 최단거리 결과가 유효하지 않을 수 있습니다.'] : null,
     );
-    await colorNodes(order);
+    await colorNodes(order, false, metrics);
   });
 }
 
@@ -1426,7 +1608,6 @@ async function clickFloydWarshallButton() {
     const { order, distances, hasNegativeCycle } = floydWarshall(nodes.value, graphConnections.value);
     const matrix = normalizeDistanceMatrix(distances);
     const startDistances = Object.fromEntries(nodes.value.map(node => [node.id, matrix[startIdx.value]?.[node.id] ?? '∞']));
-    nodeDistances.value = startDistances;
     setTraversalResult(
       'Floyd-Warshall',
       order,
@@ -1435,7 +1616,7 @@ async function clickFloydWarshallButton() {
       hasNegativeCycle ? ['음수 사이클이 감지되었습니다. 최단거리 결과가 유효하지 않을 수 있습니다.'] : null,
       matrix,
     );
-    await colorNodes(order);
+    await colorNodes(order, false, startDistances);
   });
 }
 
@@ -1445,7 +1626,6 @@ async function clickKruskalButton() {
   await runAlgorithm(async () => {
     const { order, edges, totalWeight, isConnected } = kruskal(nodes.value, graphConnections.value);
     const metrics = buildOrderMetrics(order);
-    nodeDistances.value = metrics;
     setTraversalResult(
       'Kruskal MST',
       order,
@@ -1456,8 +1636,10 @@ async function clickKruskalButton() {
         `총 가중치: ${totalWeight}`,
         isConnected ? '모든 노드가 연결되었습니다.' : '그래프가 연결되어 있지 않아 MST 대신 최소 신장 숲을 표시합니다.',
       ],
+      null,
+      edges,
     );
-    await colorNodes(order);
+    await colorNodes(order, false, metrics, edges);
   });
 }
 
@@ -1467,7 +1649,6 @@ async function clickPrimButton() {
   await runAlgorithm(async () => {
     const { order, edges, totalWeight, isConnected } = prim(nodes.value, graphConnections.value, startIdx.value);
     const metrics = buildOrderMetrics(order);
-    nodeDistances.value = metrics;
     setTraversalResult(
       'Prim MST',
       order,
@@ -1478,8 +1659,10 @@ async function clickPrimButton() {
         `총 가중치: ${totalWeight}`,
         isConnected ? '모든 노드가 연결되었습니다.' : '루트에서 닿을 수 없는 노드가 있어 부분 MST만 표시합니다.',
       ],
+      null,
+      edges,
     );
-    await colorNodes(order);
+    await colorNodes(order, false, metrics, edges);
   });
 }
 
@@ -1489,7 +1672,6 @@ async function clickTopologicalSortButton() {
   await runAlgorithm(async () => {
     const { order, hasCycle } = topologicalSort(nodes.value, graphConnections.value);
     const metrics = buildOrderMetrics(order);
-    nodeDistances.value = metrics;
     setTraversalResult(
       'Topological Sort',
       order,
@@ -1497,11 +1679,11 @@ async function clickTopologicalSortButton() {
       metrics,
       hasCycle ? ['사이클이 감지되어 전체 위상 정렬을 만들 수 없습니다.'] : ['DAG 위상 정렬이 완료되었습니다.'],
     );
-    await colorNodes(order);
+    await colorNodes(order, false, metrics);
   });
 }
 
-function setTraversalResult(label, sequence, isGrouped = false, distances = null, details = null, matrix = null) {
+function setTraversalResult(label, sequence, isGrouped = false, distances = null, details = null, matrix = null, mstEdges = null) {
   traversalResult.value = {
     label,
     isGrouped,
@@ -1509,6 +1691,7 @@ function setTraversalResult(label, sequence, isGrouped = false, distances = null
     distances: distances ? { ...distances } : null,
     details: details ? [...details] : null,
     matrix: matrix ? cloneValue(matrix) : null,
+    mstEdges: mstEdges ? mstEdges.map(edge => ({ ...edge })) : null,
   };
   activeResultStep.value = -1;
 }
@@ -1553,14 +1736,51 @@ function hasNegativeWeight() {
   });
 }
 
+function isMstEdge(index) {
+  const connection = graphConnections.value[index];
+  const mstEdges = activeMstEdges.value;
+  if (!connection || !mstEdges) return false;
+
+  const [from, to] = connection;
+  const minNode = Math.min(from, to);
+  const maxNode = Math.max(from, to);
+
+  return mstEdges.some(edge => (
+    Math.min(edge.from, edge.to) === minNode
+    && Math.max(edge.from, edge.to) === maxNode
+  ));
+}
+
+function handleKeyboardShortcut(event) {
+  if (!event.ctrlKey || event.altKey || event.metaKey) return;
+
+  const key = event.key.toLowerCase();
+  if (key !== 'z') return;
+
+  const target = event.target;
+  const isTyping = ['INPUT', 'TEXTAREA'].includes(target?.tagName) || target?.isContentEditable;
+  if (isTyping) return;
+
+  event.preventDefault();
+
+  if (event.shiftKey) {
+    redoUserDone();
+  } else {
+    cancelUserDone();
+  }
+}
+
 function canRunAlgorithm() {
   return hasNodes.value && startIdx.value !== -1 && !isProcessing.value;
 }
 
 async function runAlgorithm(callback) {
   isProcessing.value = true;
+  isSimulationPaused.value = false;
+  shouldStopSimulation.value = false;
   resetNodeOrders();
   nodeDistances.value = {};
+  activeMstEdges.value = [];
   nodeSelected.value = [];
   cancelCurrentLine();
 
@@ -1568,6 +1788,8 @@ async function runAlgorithm(callback) {
     await callback();
   } finally {
     isProcessing.value = false;
+    isSimulationPaused.value = false;
+    shouldStopSimulation.value = false;
   }
 }
 
@@ -1578,11 +1800,54 @@ function delay(ms) {
 }
 
 async function waitAnimationDelay() {
-  const startedAt = window.performance.now();
+  return waitSimulationDelay(getAnimationDelay);
+}
 
-  while (window.performance.now() - startedAt < getAnimationDelay()) {
+async function waitResetDelay() {
+  return waitSimulationDelay(() => RESET_DELAY);
+}
+
+async function waitSimulationDelay(delayGetter) {
+  let elapsed = 0;
+  let lastTick = window.performance.now();
+
+  while (elapsed < delayGetter()) {
+    if (!(await waitForSimulationContinue())) return false;
+    lastTick = window.performance.now();
+
     await delay(25);
+
+    const now = window.performance.now();
+    elapsed += now - lastTick;
+    lastTick = now;
   }
+
+  return !shouldStopSimulation.value;
+}
+
+async function waitForSimulationContinue() {
+  while (isSimulationPaused.value && !shouldStopSimulation.value) {
+    await delay(50);
+  }
+
+  return !shouldStopSimulation.value;
+}
+
+function finishSimulationVisualState() {
+  nodeSelecting.value = [];
+  activeResultStep.value = -1;
+  nodeSelected.value = [];
+}
+
+function toggleSimulationPause() {
+  if (!isProcessing.value) return;
+  isSimulationPaused.value = !isSimulationPaused.value;
+}
+
+function stopSimulation() {
+  if (!isProcessing.value) return;
+  shouldStopSimulation.value = true;
+  isSimulationPaused.value = false;
 }
 
 function getAnimationDelay() {
@@ -1590,42 +1855,127 @@ function getAnimationDelay() {
   return Number.isFinite(delayValue) ? delayValue : 0;
 }
 
-async function colorNodes(sequence, isGrouped = false) {
+async function colorNodes(sequence, isGrouped = false, metrics = null, mstEdges = null) {
   if (isGrouped) {
     for (let idx = 0; idx < sequence.length; idx += 1) {
+      if (!(await waitForSimulationContinue())) {
+        finishSimulationVisualState();
+        return;
+      }
+
       const currentLevel = sequence[idx];
       activeResultStep.value = idx;
       nodeSelecting.value = [...currentLevel];
 
       for (const node of currentLevel) {
-        markNode(node, idx + 1);
+        markNode(node, idx + 1, metrics);
       }
 
-      await waitAnimationDelay();
+      if (!(await waitAnimationDelay())) {
+        finishSimulationVisualState();
+        return;
+      }
     }
   } else {
     for (let idx = 0; idx < sequence.length; idx += 1) {
+      if (!(await waitForSimulationContinue())) {
+        finishSimulationVisualState();
+        return;
+      }
+
       const node = sequence[idx];
       activeResultStep.value = idx;
       nodeSelecting.value = [node];
-      markNode(node, idx + 1);
-      await waitAnimationDelay();
+      markNode(node, idx + 1, metrics);
+      revealMstEdgesForNode(node, mstEdges);
+      if (!(await waitAnimationDelay())) {
+        finishSimulationVisualState();
+        return;
+      }
     }
   }
 
   nodeSelecting.value = [];
   activeResultStep.value = -1;
-  await delay(RESET_DELAY);
+  if (!(await waitResetDelay())) {
+    finishSimulationVisualState();
+    return;
+  }
   nodeSelecting.value = startIdx.value === -1 ? [] : [startIdx.value];
   nodeSelected.value = [];
 }
 
-function markNode(node, order) {
+async function animateDijkstraSteps(steps) {
+  const visitedNodes = [];
+  let visitOrder = 1;
+
+  for (let index = 0; index < steps.length; index += 1) {
+    if (!(await waitForSimulationContinue())) {
+      finishSimulationVisualState();
+      return;
+    }
+
+    const step = steps[index];
+    activeResultStep.value = Math.max(0, visitedNodes.length - 1);
+    nodeSelecting.value = step.node ? [step.node] : [];
+    nodeDistances.value = normalizeDistances(step.distances);
+
+    if (step.type === 'visit' && !visitedNodes.includes(step.node)) {
+      visitedNodes.push(step.node);
+      markNode(step.node, visitOrder);
+      visitOrder += 1;
+      activeResultStep.value = visitedNodes.length - 1;
+    }
+
+    if (!(await waitAnimationDelay())) {
+      finishSimulationVisualState();
+      return;
+    }
+  }
+
+  nodeSelecting.value = [];
+  activeResultStep.value = -1;
+  if (!(await waitResetDelay())) {
+    finishSimulationVisualState();
+    return;
+  }
+  nodeSelecting.value = startIdx.value === -1 ? [] : [startIdx.value];
+  nodeSelected.value = [];
+}
+
+function markNode(node, order, metrics = null) {
   if (!nodeSelected.value.includes(node)) {
     nodeSelected.value.push(node);
   }
 
   nodeOrders.value[node] = order;
+
+  if (metrics && metrics[node] !== undefined) {
+    nodeDistances.value[node] = metrics[node];
+  }
+}
+
+function revealMstEdgesForNode(nodeId, mstEdges = null) {
+  if (!mstEdges) return;
+
+  for (const edge of mstEdges) {
+    const touchesVisitedNode = edge.from === nodeId || edge.to === nodeId;
+    const bothNodesVisible = nodeSelected.value.includes(edge.from) && nodeSelected.value.includes(edge.to);
+
+    if (touchesVisitedNode && bothNodesVisible && !hasActiveMstEdge(edge)) {
+      activeMstEdges.value.push({ ...edge });
+    }
+  }
+}
+
+function hasActiveMstEdge(edge) {
+  const minNode = Math.min(edge.from, edge.to);
+  const maxNode = Math.max(edge.from, edge.to);
+
+  return activeMstEdges.value.some(activeEdge => (
+    Math.min(activeEdge.from, activeEdge.to) === minNode
+    && Math.max(activeEdge.from, activeEdge.to) === maxNode
+  ));
 }
 
 function resetNodeOrders() {
@@ -1661,17 +2011,33 @@ watch(
   { deep: true },
 );
 
+window.addEventListener('keydown', handleKeyboardShortcut);
+
 onBeforeUnmount(() => {
   window.clearTimeout(autoSaveTimer);
   window.removeEventListener('mousemove', drawLine);
   window.removeEventListener('mousemove', dragNode);
   window.removeEventListener('mouseup', stopNodeDrag);
+  window.removeEventListener('mousemove', panGraph);
+  window.removeEventListener('mouseup', stopGraphPan);
+  window.removeEventListener('mousemove', updateNodeSelection);
+  window.removeEventListener('mouseup', finishNodeSelection);
+  window.removeEventListener('keydown', handleKeyboardShortcut);
 });
 </script>
 
 <template>
   <div ref="graphRoot" class="graph-editor" @contextmenu.prevent="handleMouseDown">
-    <div v-if="isProcessing" class="overlay"></div>
+    <div
+      v-if="isProcessing"
+      class="overlay"
+      @click.stop="toggleSimulationPause"
+      @contextmenu.stop.prevent="stopSimulation"
+    >
+      <div class="simulation-control-hint">
+        {{ isSimulationPaused ? 'Paused - left click to resume, right click to stop' : 'Running - left click to pause, right click to stop' }}
+      </div>
+    </div>
 
     <div class="graph-toolbar">
       <h1>Graph Editor</h1>
@@ -2067,7 +2433,7 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <svg class="graph-canvas" @click="handleClick">
+    <svg class="graph-canvas" @mousedown.left="handleCanvasMouseDown" @click="handleClick">
       <defs>
         <marker
           id="arrow-forward"
@@ -2123,8 +2489,19 @@ onBeforeUnmount(() => {
         :x2="getVisibleLine(line).x2"
         :y2="getVisibleLine(line).y2 - TOOLBAR_HEIGHT"
         class="edge-line"
+        :class="{ 'edge-line-mst': isMstEdge(index) }"
         :marker-end="hasForwardDirection(index) ? 'url(#arrow-forward)' : null"
         :marker-start="hasBackwardDirection(index) ? 'url(#arrow-backward)' : null"
+      />
+      <line
+        v-for="(line, index) in lines"
+        v-show="isMstEdge(index)"
+        :key="`line-mst-${index}`"
+        :x1="getVisibleLine(line).x1"
+        :y1="getVisibleLine(line).y1 - TOOLBAR_HEIGHT"
+        :x2="getVisibleLine(line).x2"
+        :y2="getVisibleLine(line).y2 - TOOLBAR_HEIGHT"
+        class="edge-line-mst-glow"
       />
       <line
         v-for="(line, index) in lines"
@@ -2186,6 +2563,14 @@ onBeforeUnmount(() => {
         :x2="getVisibleLine(currentLine).x2"
         :y2="getVisibleLine(currentLine).y2 - TOOLBAR_HEIGHT"
         class="edge-line edge-line-preview"
+      />
+      <rect
+        v-if="selectionRect"
+        :x="selectionRect.x"
+        :y="selectionRect.y - TOOLBAR_HEIGHT"
+        :width="selectionRect.width"
+        :height="selectionRect.height"
+        class="selection-rect"
       />
     </svg>
 
@@ -2251,6 +2636,7 @@ onBeforeUnmount(() => {
         'node-pending': selectedNode === index,
         'node-dragging': dragNodeId === node.id,
         'node-start': startIdx === node.id && !nodeSelecting.includes(node.id),
+        'node-group-selected': selectedGroupNodeIds.includes(node.id),
       }"
       :style="{
         left: `${node.x}px`,
@@ -2405,9 +2791,25 @@ onBeforeUnmount(() => {
 .overlay {
   position: fixed;
   inset: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 120px;
   background-color: rgba(0, 0, 0, 0.2);
   z-index: 999;
   pointer-events: all;
+}
+
+.simulation-control-hint {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(18, 23, 33, 0.88);
+  color: #fff;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.24);
+  font-size: 13px;
+  font-weight: 700;
+  padding: 9px 14px;
+  pointer-events: none;
 }
 
 .algorithm-groups {
@@ -3148,9 +3550,26 @@ onBeforeUnmount(() => {
   border-color: #60a5fa;
 }
 
+.node-group-selected {
+  border-color: #a78bfa;
+  box-shadow: 0 0 0 6px rgba(167, 139, 250, 0.26);
+}
+
 .edge-line {
   stroke: white;
   stroke-width: 2;
+}
+
+.edge-line-mst {
+  stroke: #facc15;
+  stroke-width: 4;
+}
+
+.edge-line-mst-glow {
+  stroke: rgba(250, 204, 21, 0.32);
+  stroke-width: 12;
+  stroke-linecap: round;
+  pointer-events: none;
 }
 
 .edge-hit-line {
@@ -3175,6 +3594,14 @@ onBeforeUnmount(() => {
   stroke: black;
   stroke-width: 3.4;
   stroke-linecap: round;
+  pointer-events: none;
+}
+
+.selection-rect {
+  fill: rgba(96, 165, 250, 0.14);
+  stroke: #60a5fa;
+  stroke-width: 1.5;
+  stroke-dasharray: 6, 4;
   pointer-events: none;
 }
 
